@@ -248,7 +248,7 @@ sub add_phyloxml_property {
 
 sub xml_sanitize {
     my ($string) = @_;
-    return "" unless $string;
+    return "" unless length($string);
     $string =~ s/</&lt;/g;
     $string =~ s/>/&gt;/g;
     $string =~ s/&(?!(#\d{1,3}|lt|gt|amp);)/&amp;/g;
