@@ -292,12 +292,19 @@ sub build_phyml_tree {
         $comment = "Support values from the approximate likelihood ratio test.";
         $treeFile = $output_base."_phyml_alr_tree.nwk";
     }
+    if ($ENV{P3_ALLOCATED_CPU}) {
+        # set PHYMLCPUS environment variable
+        print STDOUT "set PHYMLCPUS to $ENV{P3_ALLOCATED_CPU}\n";
+        $ENV{PHYMLCPUS} = $ENV{P3_ALLOCATED_CPU};
+    }
+   
     
     $self->add_analysis_step($analysis_descriptor, join(" ", @cmd));
     $self->add_analysis_comment($comment);
-    print STDOUT "run command: ". join(" ", @cmd)."\n" if $debug;
+    print STDOUT "run phyml command: ". join(" ", @cmd)."\n" if $debug;
     my ($out, $err) = run_cmd(\@cmd);
     $self->add_analysis_out_err($out, $err);
+    print STDOUT "phmyl stdout:\n$out\n";
     move($self->{_phylip_file}."_phyml_tree.txt", "$self->{_output_dir}/$treeFile");# copy final tree to original working directory
     $self->add_analysis_tree($treeFile);
     my $logFile = $output_base."_phyml_log.txt";
