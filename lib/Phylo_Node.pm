@@ -144,15 +144,20 @@ sub parse_newick {
     my ($support, $name, $branch_length) = ('', '', '');
     if (scalar @end_words == 1) {
         # either a name or support value, go by number vs not-number
-        if (scalar(@subclades) > 0 and $end_words[0] =~ /^[\d\.eE-]+$/) {
-            $support = $end_words[0]; # interior node and all-numeric
+        if (scalar(@subclades) > 0) {
+            if ($end_words[0] =~ /^[\d.eE-]+$/) {
+                $support = $end_words[0]; # interior node and all-numeric
+            }
+            elsif ($end_words[0] =~ /^['"]?([\d.eE-]+):(.*)['"]?&/) { # case of support+name combo, as found in GTDB trees
+                ($support, $name) = ($1, $2);
+            }
         }
         else {
             $name = $end_words[0];
         }
     }
     elsif (scalar @end_words == 2) { # case of name:bl
-        if ($end_words[0] =~ /^['"](.*):(.*)['"]&/) { # case of support+name combo, as found in GTDB trees
+        if ($end_words[0] =~ /^['"]?([\d.eE-]+):(.*)['"]?/) { # case of support+name combo, as found in GTDB trees
             ($support, $name) = ($1, $2);
         }
         elsif (scalar(@subclades) > 0 and $end_words[0] =~ /^[\d\.eE-]+$/) {

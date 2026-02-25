@@ -61,7 +61,7 @@ my($opt, $usage) = P3Utils::script_opts('newickFile',
                 ['name=s', 'Name for tree in phyloxml.'],
                 ['remove_substring|r=s', 'Substring to be removed from finalized data'],
                 ['description=s', 'Description of tree in phyloxml.'],
-                ['gtdb_bvbrc=s', 'Translation table from GTDB IDs to BVBRC genome IDs.'],
+                ['id_translation=s', 'Translation table for tip IDs.'],
                 ['annotationtsv|a=s', 'TSV file containing annotation for tips on the tree (or comma-delimited list)'],
                 ['provenance|p=s', 'Provenance of annotation. (default: BVBRC)', { default => 'BVBRC' }],
         );
@@ -133,8 +133,10 @@ unless (-f $newickFile) {
     exit(1);
 }
 
-my $tree = new Phylo_Tree($newickFile);
+my $tree = new Phylo_Tree(); 
 #print STDERR "read tree. Newick is\n", $tree->write_newick(), "\n" if $debug;
+
+$tree->read_newick($newickFile);
 
 if ($opt->databaselink) {
     $tree->set_type($opt->databaselink);
@@ -145,9 +147,9 @@ if ($opt->name) {
 if ($opt->description) {
     $tree->set_description($opt->description);
 }
-if ($opt->gtdb_bvbrc) { #read  translation from GTDB IDs to bvbrc genome_ids
-    print STDERR "reading gtdb_bvbrc from $opt->gtdb_bvbrc\n" if $debug;
-    open F, $opt->gtdb_bvbrc;
+if ($opt->id_translation) { #translate tip IDs
+    print STDERR "reading tip label translation from $opt->id_translation\n" if $debug;
+    open F, $opt->id_translation;
     my %gtdb_bvbrc;
     while (<F>) {
         chomp;
@@ -157,8 +159,8 @@ if ($opt->gtdb_bvbrc) { #read  translation from GTDB IDs to bvbrc genome_ids
     # iterate over tips of tree
     # swap GTDB ID for BVBRC genome ID
     # store GTDB ID as metadata for node
-    print STDERR "swapping input GTDB IDs for BVBRC genome IDs\n" if $debug;
-    $tree->swap_tip_names(\%gtdb_bvbrc, 'GTDB_ID');
+    print STDERR "swapping tip IDs\n" if $debug;
+    $tree->swap_tip_names(\%gtdb_bvbrc, 'original_id');
 }
 
 my %meta_column; #first key is column (field name), second key is row (tip ID)
