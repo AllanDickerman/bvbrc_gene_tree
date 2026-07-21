@@ -4,7 +4,7 @@ use warnings;
 use List::Util qw(max);
 #
 # Don't import all; we are clashing with write_fasta
-use gjoseqlib qw();
+#use gjoseqlib qw();
 
 our $debug = 0;
 
@@ -17,40 +17,84 @@ sub new {
     }
     my $self = {};
     bless $self, $class;
-    $self->{_seqs} = {};
-    $self->{_annot} = {};
+    $self->{_seqs} = {}; # allow multiple loci
+    #$self->{_annot} = {};
     $self->{_ids} = [];
-    $self->{_is_aligned} = 0;
-    $self->{_length} = 0;
-    $self->{_format} = '';
+    $self->{_default_locus} = '';
+    #    $self->{_is_aligned} = 0;
+    $self->{_length} = {};
+
     if ($input) {
         $self->read_file($input)
     }
-    print( STDERR "new Sequence_Alignment: ids=", $self->{_ids}, "\n") if $debug;
+    print( STDERR "new Sequence_Alignment\n") if $debug;
     return $self;
 }
 
 sub set_debug {my $onoff = shift; $debug = $onoff ? 1 : 0}
+#sub set_is_aligned {my $self = shift; my $onoff = shift; $self->{_is_aligned} = $onoff ? 1 : 0}
 sub get_ntaxa { my $self = shift; return scalar(@{$self->{_ids}})}
-sub get_length { my $self = shift; return $self->{_length}}
-sub is_aligned { my $self = shift; return $self->{_is_aligned}}
-sub get_ids { my $self = shift; return $self->{_ids}}
-
-sub instantiate_from_hash { 
-    my $self = shift;
-    my $in_hash = shift;
-    $self->{_seqs} = %{$in_hash};
-    $self->{_ids} = keys %{$in_hash};
-    $self->{_is_aligned} = 1;
-    for my $id ($self->{_ids}) {
-        my $seqlen = length($self->{_seqs}{$id});
-        $self->{_is_aligned} = 0 if $self->{_length} and $seqlen != $self->{_length};
-        $self->{_length} = $seqlen if $seqlen > $self->{_length};
+sub get_length { 
+    my ($self, $locus) = @_; 
+    if ($locus) {
+        return($self->{_length}{$locus})
     }
-    return $self;
+    else {
+        my $total_length = 0;
+        for my $locus (keys %{$self->{_length}}) {
+            $total_length += $self->{_length}{$locus}
+        }
+        return $total_length;
+    }
+}
+sub get_ids { 
+    my ($self, $locus) = @_; 
+    if ($locus) {
+        return keys(%{$self->{_seqs}})
+    }
+    return $self->{_ids}
 }
 
-sub detect_format {
+sub add_seq { 
+    my ($self, $id, $seq, $locus) = @_;
+    if ($locus) {
+        if (!$self->{_default_locus}) {
+            $self->{_default_locus} = $locus;
+        }    
+    }
+    else {
+        if (!$self->{_default_locus}) {
+            $self->{_default_locus} = 'default';
+        }
+        $locus = $self->{_default_locus};
+    }
+
+    if (! exists $self->{_seqs}{$locus}) {
+        $self->{_seqs}{$locus} = {};
+        $self->{_length}{$locus} = 0;
+    }
+    if (exists $self->{_seqs}{$locus}{$id}) { # make identifier unique in case of duplicate
+        warn("duplicate occurence of id $id at locus $locus");
+        my $temp = $id;
+        my $suffix = 1;
+        while (exists $self->{_seqs}{$locus}{$temp}) {
+            $suffix++;
+            $temp = "${id}_$suffix";
+        }
+        print STDERR "sequence id $id exists\nincrementing to $temp\n" if $debug;
+        $id = $temp;
+    }
+    $self->{_seqs}{$locus}{$id} = $seq;
+    if (length($seq) > $self->{_length}{$locus}) {
+        $self->{_length}{$locus} = length($seq)
+    }
+    # add id to _ids if it is not already there (keep it unique)
+    unless (exists($self->{_ids}[$id])) {
+        push(@{$self->{_ids}}, $id);
+    }
+}
+
+sub detect_file_format {
     my $class = shift;
     my $fh = shift;
     print STDERR "in detect_format, class=$class, fh=$fh\n" if $debug;
@@ -70,23 +114,22 @@ sub detect_format {
 }
 
 sub read_file {
-    my $self = shift;
-    my $fh = shift;
+    my ($self, $fh, $format, $locus) = @_;
     if ( ! ref($fh) ) {
         print STDERR "in read_file, not a file handle, open file $fh\n" if $debug;
         my $temp = undef;
         open $temp, $fh;
         $fh = $temp;
     } 
-    my $format = shift;
-    if (! defined $format)
-    {
-        $format = $self->detect_format($fh)
+    if (! $locus) {
+        $locus = $self->{_default_locus};
     }
-    $self->{_format} = $format;
+    if (! $format) {
+        $format = $self->detect_file_format($fh)
+    }
     if ($format eq 'unknown') {
-        return undef}
-
+        return undef;
+    }
     if ($format eq 'clustal') {
         my $found = 0;
         while (<$fh>) {
@@ -98,9 +141,8 @@ sub read_file {
         die "Format seems to be wrong, not Clustal.\n" if (!$found); 
         while (<$fh>) {
             if (/^(\S+)\s+(\S+)/) {
-                push(@{$self->{_ids}}, $1) unless exists($self->{_seqs}{$1});
-
-                $self->{_seqs}{$1} .= $2;
+                my ($id, $seq) = ($1, $2);
+                $self->add_seq($id, $seq, $locus)
             }
         }
     }
@@ -109,14 +151,15 @@ sub read_file {
         die "Format does not seem to be phylip\n" if (!/^\s*(\d+)\s+(\d+)\s*$/);
         my $ntaxa = $1;
         my $nchar = $2;
+        my %seqhash = {};
+        my @ids;
         for my $i (1..$ntaxa) {
             $_ = <$fh>;
             /(\S+)\s+(\S.*\S)/ or die $_;
             my $id = $1;
             my $seq = $2;
-            $seq =~ s/\s//g;
-            $self->{_seqs}{$id} = $seq;
-            push @{$self->{_ids}}, $id;
+            push(@ids, $id);
+            $seqhash{$id} = $seq;
         }
         # now if there are more lines, read in same order as first set, but without identifiers
         my $index = 0;
@@ -124,193 +167,167 @@ sub read_file {
             my $seq = $_;
             $seq =~ s/\s//g;
             if ($seq) {
-                my $id = $self->{_ids}[$index % $ntaxa];
-                $self->{_seqs}{$id} .= $seq;
+                my $id = $ids[$index % $ntaxa];
+                $seqhash{$id} .= $seq;
                 $index += 1
             }
         }
-        foreach my $id (@{$self->{_ids}}) { # phylip uses '.' as insert (unknown) character
-            $self->{_seqs}{$id} =~ s/\./\-/g; # replace dot as gap char with '-'
+        foreach my $id (@ids) { # phylip uses '.' as insert (unknown) character
+            $seqhash{$id} =~ s/\./\-/g; # replace dot as gap char with '-'
+            $self->add_seq($id, $seqhash{$id}, $locus);
         }
     }
     elsif ($format eq 'fasta') {
-        my $id;
-        my $first_seq_len;
-        while (my($id, $def, $seq) = gjoseqlib::read_next_fasta(\*$fh))
-        {
-            chomp;
-            my $x = $seq =~ tr/ //d;
-            if ($x) { print STDERR "$x spaces found in $id\n"};
-            my $cur_len = length($seq);
-            if ($first_seq_len) {
-                print STDERR "$id length $cur_len\n" if $cur_len != $first_seq_len;
-            }
-            else { 
-                print "first sequence $id has length $cur_len\n" if $debug; 
-                $first_seq_len = $cur_len;
-            }
-            if (exists $self->{_seqs}{$id}) { # make identifier unique in case of duplicate
-                my $temp = $id;
-                my $suffix = 1;
-                while (exists $self->{_seqs}{$temp}) {
-                    $suffix++;
-                    $temp = "${id}_$suffix";
+        #while (    my($id, $def, $seq) = gjoseqlib::read_next_fasta(\*$fh))
+        #
+        my ($id, $seq);
+        while (<$fh>) {
+            if (/^>(\S)+/) {
+                if ($seq) {
+                    $seq =~ tr/ //d;
+                    $self->add_seq($id, $seq, $locus);
                 }
-                print STDERR "sequence id $id exists\nincrementing to $temp\n" if $debug;
-                $id = $temp;
+                /^>(\S)+/;
+                $id = $1;
             }
-            push @{$self->{_ids}}, $id;
-            $self->{_annot}{$id} = $def if $def;
-            $self->{_seqs}{$id} = $seq;
+            elsif (/(.*\S)/) {
+                $seq .= $1;
+            }
+        }
+        if ($seq) {       
+            $seq =~ tr/ //d;
+            $self->add_seq($id, $seq, $locus)
         }
     }
     elsif ($format eq 'nexus')
     {
         $_ = <$fh>;
-        die "Format does not seem to be NEXUS" if (!/\#NEXUS/);
-        my $data;
-        my $ntax;
-        my $nchar;
+        die "Format does not seem to be NEXUS" unless (/\#NEXUS/);
         my $matrix;
         while (<$fh>) {
             chomp;
-            s/\[[^\]]*\]//g;
-            $data = 1 if (/^begin data/i);
-            if ($data and !$matrix and /^dimensions/i) {
-                $ntax = $1 if (/ntax=(\d+)/i);
-                $nchar = $1 if (/nchar=(\d+)/i);
+            s/\[[^\]]*\]//g; # strip out comments in square brackets
+            if (/^matrix/i){
+                $matrix = 1;
+                next;
             }
-            $matrix = 1 if ($data and /^matrix/i);
             if ($matrix) {	    
                 if (/^(\S+)\s+(\S+)/) {
-                    push @{$self->{_ids}}, $1 unless $self->{_seqs}{$1};
-                    $self->{_seqs}{$1} .= $2;
+                    my ($id, $seq) = ($1, $2);
+                    $self->add_seq($id, $seq, $locus)
                 }
                 last if (/;/);
             }
         }
     }
-    my $first_id = $self->{_ids}[0];
-    $self->{_length} = length($self->{_seqs}{$first_id});
-    $self->{_is_aligned} = 1;
-    print STDERR "now review sequences, length = $self->{_length}:\n" if $debug;
-    for my $id (@{$self->{_ids}}) {
-        if (length($self->{_seqs}{$id}) != $self->{_length}) {
-            $self->{_is_aligned} = 0;
-            print STDERR "found seq of different length: ", length($self->{_seqs}{$id}), " $id, vs $self->{_length}\n" if $debug;
-            $self->{_length} = max($self->{_length}, length($self->{_seqs}{$id}))
+}
+
+sub write_to_file {
+    my ($self, $fh, $format, $locus) = @_;
+    if (!$locus) {
+        $locus = $self->{_default_locus};
+    }
+    my $out = $fh;
+    if ( ! ref($fh) ) {
+        print STDERR "in write_to_file, not a file handle, open file $fh\n" if $debug;
+        open($out, ">", $fh);
+    } 
+    if (! $format) {
+        $format = 'fasta';
+    }
+    my @ids = $self->get_ids($locus);
+    my %seqs;
+    my @loci = [$locus];
+    if ($locus eq 'all') {
+        @loci = $self->get_locus_ids();
+    }
+    for my $loc (@loci) {
+        for my $id (@ids) {
+            if (exists($self->{_seqs}{$loc}{$id})) {
+                $seqs{$id} .= $self->{_seqs}{$loc}{$id}
+            }
+            else {
+                $seqs{$id} .= '-'*$self->get_length($loc)
+            }
         }
-        #print STDERR "id $id ; len ", length($self->{_seqs}{$id}), " ; is_al=$self->{_is_aligned} \n";
+    }
+    my $max_id_length = 0;
+    if ($format eq 'phylip') {
+        print $out $self->get_ntaxa(), "  ", $self->get_length(), "\n";
+        for my $id (@ids) {
+            if (length($id) > $max_id_length) {
+                $max_id_length = length($id);
+            }
+        }
+    }
+    if ($format eq 'raxml') {
+        #my $raxml_illegal_chars = ":()[]";
+        for my $id (@{$self->{_ids}}) {
+            if ($id =~ tr/:()[]/:()[]/) { # counts but doesn't change
+                $self->{_raxml_to_orignal_id} = {};
+                last
+            }
+        }
+    }
+    for my $id (@ids) {
+        if ($format eq 'fasta') {
+            print($out, ">$id\n$seqs{$id}\n");
+        }
+        elsif ($format eq 'phylip') {
+            print($out, $id, " "*($max_id_length-length($id)+4), $seqs{$id}, "\n");
+            #printf($out "%-${max_id_length}s  %s\n", $id, $seq);
+        }
+        #elsif ($format eq 'nexus') {
+        #    print($out, $id, " "*(max_id_length-length($id)+2), $seq{$id}, "\n");
+        #}
+        elsif ($format eq 'raxml') {
+            my $orig = $id;
+            my $seq = $seqs{$id};
+            my $changed = $id =~ tr/:()[]/_____/; #replace with underscores
+            if ($changed) {
+                print STDERR "in write_fasta_for_raxml: original=$orig, changed=$id\n" if $debug;
+                if (!exists( $self->{_raxml_to_orignal_id})) {
+                    $self->{_raxml_to_orignal_id} = {};
+                }
+                $self->{_raxml_to_original_id}{$id} = $orig;
+            }
+            print $out ">$id\n$seq\n";
+        }
+    }
+    if ($out ne $fh) {
+        print "closing $fh\n" if $self->{_debug};
+        close $out  #because we opened it
+    } 
+}
+
+sub unalign() {
+    my $self = shift;
+    foreach my $locus (keys %{$self->{_seqs}}) {
+        foreach my $id (keys %{$self->{_seqs}{$locus}}) {
+                $self->{_seqs}{$locus}{$id} =~ tr/-//d;
+        }
     }
 }
 
 sub write_fasta {
   # write out in fasta format
-    my $self = shift;
-    my $out = shift;
-    my $write_unaligned = shift;
-    print STDERR "in write_fasta($out), ref(out) = ", ref($out), "\n" if $debug; 
-    my $FH = $out;
-    unless (ref($out) and ref($out) eq "GLOB") {
-        print STDERR "opening $out for fasta output.\n" if $debug;
-        open(TEMP, ">", $out);
-        $FH = *TEMP;
-        die "Cannot open file for writing at $out\n" unless $FH;
-    }
-    foreach my $id (@{$self->{_ids}}) {
-        print $FH ">",$id, "\n";
-        die "id from _id is not in _seqs" unless exists $self->{_seqs}->{$id};
-        my $seq = $self->{_seqs}->{$id};
-        if ($write_unaligned) {
-            $seq =~ tr/-//d;
-        }
-        elsif (length($seq) != $self->{_length}) {
-            die "sequence $id has unexpected length: ", length($seq), " vs $self->{_length}";
-        }
-        die "seq length is zero for $id" unless $seq;
-        print $FH "$seq\n";
-    }
-    if ($out ne $FH) {
-        print "closing $FH\n" if $debug;
-        close $FH  #because we opened it
-    } 
+    my ($self, $out, $locus) = @_;
+    $self->write_to_file($out, 'fasta', $locus);
 }
 
 sub write_phylip {
   # write out in phylip format
-    my $self = shift;
-    my $out = shift;
-    if ($debug) {
-        print STDERR "In write_phylip\n";
-        print STDERR "self = $self\n";
-        print STDERR "out = $out\n";
-    }
-    warn "alignment status is $self->{_is_aligned} in write_phylip()" unless $self->{_is_aligned};
-    my $FH;
-    if (ref($out) and ref($out) eq "GLOB") {
-        $out = $FH
-    }
-    else {
-        print STDERR "opening $out for phylip output.\n" if $debug;
-        open($FH, ">$out");
-    }
-    print $FH $self->get_ntaxa(), "  ", $self->get_length(), "\n";
-    my $maxIdLength = 0;
-    foreach my $id (@{$self->{_ids}}) {
-        $maxIdLength = length($id) if length($id) > $maxIdLength;
-    }
-    foreach my $id (@{$self->{_ids}}) {
-        my $seq = $self->{_seqs}->{$id};
-        next unless $seq;
-        #$seq = ambiguateEndGaps($seq) if ($opt_e);
-	    printf($FH "%-${maxIdLength}s %s\n", $id, $seq);
-    }
-    if ($out ne $FH) {
-        print "closing $FH\n";
-        close $FH  #because we opened it
-    } 
+    my ($self, $out, $locus) = @_;
+    $self->write_to_file($out, 'fasta', $locus);
 }
 
-sub write_fasta_for_raxml {
-    my $self = shift;
-    my $out = shift;
-    print STDERR "in write_fasta_for_raxml, ref(out) = ", ref($out), "\n" if $debug; 
-    my $FH = $out;
-    unless (ref($out) and ref($out) eq "GLOB") {
-        print STDERR "opening $out for fasta output.\n" if $debug;
-        open(my $TEMP, ">", $out);
-        $FH = $TEMP;
-    }
-    #my $raxml_illegal_chars = ":()[]";
-    my $need_changing = 0;
-    for my $id (@{$self->{_ids}}) {
-        if ($id =~ tr/:()[]/:()[]/) { # counts but doesn't change
-            $need_changing = 1;
-            $self->{_raxml_to_orignal_id} = {};
-            last
-        }
-    }
-    for my $id (@{$self->{_ids}}) {
-        my $seq = $self->{_seqs}->{$id};
-        if ($need_changing) {
-            my $orig = $id;
-            my $changed = $id =~ tr/:()[]/_____/; #replace with underscores
-            if ($changed) {
-                print STDERR "in write_fasta_for_raxml: original=$orig, changed=$id\n" if $debug;
-                $self->{_raxml_to_original_id}{$id} = $orig;
-            }
-        }
-        print $FH ">$id\n$seq\n";
-    }
-    if ($out ne $FH) {
-        print "closing $FH\n";
-        close $FH  #because we opened it
-    } 
-    return $need_changing;
+sub write_fasta_for_raxml { # edit out illegal characters in sequence ids
+    my ($self, $out, $locus) = @_;
+    $self->write_to_file($out, 'raxml', $locus);
 }
 
 sub restore_original_ids_in_raxml_tree {
-    my ($self, $newick);
+    my ($self, $newick) = @_;
     return $newick unless exists $self->{_raxml_to_orignal_id};
     for my $raxml_id (keys %{$self->{_raxml_to_orignal_id}}) {
         $newick =~ s/$raxml_id/$self->{_raxml_to_orignal_id}{$raxml_id}/;
@@ -318,45 +335,18 @@ sub restore_original_ids_in_raxml_tree {
     return $newick
 }
 
-
 sub calc_column_gap_count {
-    my $self = shift;
+    my ($self, $locus) = shift;
     #print STDERR "In calc_column_gap_count\n";
     my @gap_count;
-    $#gap_count = $self->{_length}-1;
-    for my $id (@{$self->{_ids}}) {
-        my @str_as_array = split('', $self->{_seqs}->{$id});
-        for my $i (0 .. $#str_as_array) {
-            $gap_count[$i] += $str_as_array[$i] eq '-';
+    $#gap_count = $self->{_length}{$locus}-1;
+    for my $id (keys %{$self->{_seqs}{$locus}}) {
+        my @str_as_array = split('', $self->{_seqs}{$locus}{$id});
+        for my $gap_pos (0 .. $#str_as_array) {
+            $gap_count[$gap_pos] += $str_as_array[$gap_pos] eq '-';
         }
     }
     return \@gap_count;
-}
-
-sub calculate_entropy_per_column {
-    my $self = shift;
-    my @column_entropy;
-    for my $column_index (0 .. $self->get_length()) {
-        my %letter_count = ();
-        my $num_valid = 0;
-        for my $id (@{$self->{_ids}}) {
-            die "in calculate_entropy: sequence $id too short: $column_index, versus $self->{_length}" if $column_index > length($self->{_seqs}->{$id});
-            my $letter = substr($self->{_seqs}->{$id}, $column_index, 1);
-            unless ($letter eq "-") {
-                $letter_count{$letter}++;
-                $num_valid++
-            }
-        }
-        my $entropy = 0;
-        for my $letter (keys %letter_count) {
-            my $frequency = $letter_count{$letter} / $num_valid;
-            if ($frequency) {
-                $entropy += $frequency * log( 1/$frequency )
-            }
-        }
-        push @column_entropy, $entropy;
-    }
-    return \@column_entropy;
 }
 
 sub write_stats {
@@ -376,74 +366,77 @@ sub write_stats {
     }
     $avg_gaps_per_seq /= $self->get_ntaxa();
 
-    my $per_col_entropy = $self->calculate_entropy_per_column();
-    my $avg_entropy = 0;
-    for my $e (@$per_col_entropy) {
-        $avg_entropy += $e
-    }
-    $avg_entropy /= $self->get_length();
     my $retval = "";
     $retval .= "Alignment Statistics\n";
     $retval .= "\tNumber of sequences    = ". $self->get_ntaxa(). "\n";
     $retval .= "\tAlignment length       = ". $self->get_length(). "\n";
     $retval .= "\tProportion gaps        = ". sprintf("%.4f", $avg_gaps_per_seq/$self->get_length()). "\n";
-    $retval .= "\tAverage column entropy = ". sprintf("%.3f", $avg_entropy). "\n";
+    #$retval .= "\tAverage column entropy = ". sprintf("%.3f", $avg_entropy). "\n";
     return $retval;
 }
 
 sub end_trim {
     # trim gappy ends inward to a minimum occupancy threshold (proportion of non-gap chars)
-    my ($self, $threshold) = @_;
+    my ($self, $threshold, $locus) = @_;
     print STDERR "In end_trim($threshold)\n" if $debug;
     ($threshold <= 1.0 and $threshold > 0) or die "threshold must be between 0 and 1";
-    my $gap_count = $self->calc_column_gap_count();
-    my $max_gaps = (1.0 - $threshold) * $self->get_ntaxa();
-    my $vis = '';
-    my $vis2 = '';
-    #print "Length of \@gap_count = ", scalar(@$gap_count), ", vs self->length = $self->{_length}\n";
-    for my $i (0 .. $self->{_length}-1) {
-        my $prop10 = int(10 * $gap_count->[$i] / $self->get_ntaxa());
-        $prop10 = 9 if $prop10 > 9;
-        $vis .= $prop10;
-        $vis2 .= $i % 10;
-    }
-    #print "$vis\n$vis2\n";
+    if ($locus) {
+        my $gap_count = $self->calc_column_gap_count($locus);
+        my $max_gaps = (1.0 - $threshold) * scalar(keys %{$self->{_seqs}{$locus}});
+        if ($debug & 0) {
+            my $vis = '';
+            my $vis2 = '';
+            print "Length of \@gap_count = ", scalar(@$gap_count), ", vs self->length = $self->{_length}\n";
+            for my $i (0 .. $self->{_length}-1) {
+                my $prop10 = int(10 * $gap_count->[$i] / $self->get_ntaxa());
+                $prop10 = 9 if $prop10 > 9;
+                $vis .= $prop10;
+                $vis2 .= $i % 10;
+            }
+            print "$vis\n$vis2\n";
+        }
 
-    my $start = 0;
-    $start++ while ($gap_count->[$start] > $max_gaps and $start < $self->{_length}-1);
-    my $end = $self->{_length}-1;
-    $end-- while ($end and $gap_count->[$end] > $max_gaps);
-    my $num_end_columns_trimmed = $self->{_length} - $end - 1;
-    my $len = $end - $start + 1;
-    print STDERR "Trim up to $start and after $end\n" if $debug;
-    #print substr($vis, $start, $len), "\n";
-    #print substr($vis2, $start, $len), "\n";
-    for my $id (@{$self->{_ids}}) {
-            $self->{_seqs}->{$id} = substr($self->{_seqs}->{$id}, $start, $len);
-            die "end trimming made sequence $id too short: ", length($self->{_seqs}->{$id}), " vs $len" if length($self->{_seqs}->{$id}) != $len;
+        my $start = 0;
+        $start++ while ($gap_count->[$start] > $max_gaps and $start < $self->{_length}-1);
+        my $end = $self->{_length}-1;
+        $end-- while ($end and $gap_count->[$end] > $max_gaps);
+        my $num_end_columns_trimmed = $self->{_length} - $end - 1;
+        my $len = $end - $start + 1;
+        print STDERR "Trim up to $start and after $end\n" if $debug;
+        #print substr($vis, $start, $len), "\n";
+        #print substr($vis2, $start, $len), "\n";
+        for my $id (keys %{$self->{_seqs}{$locus}}) {
+                $self->{_seqs}{$locus}{$id} = substr($self->{_seqs}{$locus}{$id}, $start, $len);
+                #die "end trimming made sequence $id too short: ", length($self->{_seqs}->{$id}), " vs $len" if length($self->{_seqs}->{$id}) != $len;
+        }
+        $self->{_length} = $len;
+        return ($start, $num_end_columns_trimmed);
     }
-    $self->{_length} = $len;
-    return ($start, $num_end_columns_trimmed);
+    else { # locus not passed
+        for my $locus (keys %{$self->{_seqs}}) {
+            $self->end_trim($threshold, $locus)
+        }
+    }
 }
 
 sub calc_row_gap_count
-{
-    my $self = shift;
-    print STDERR "In calc_row_gap_count\n" if $debug;
-    my %gap_count;
-    for my $id (@{$self->{_ids}}) {
-        $gap_count{$id} = $self->{_seqs}->{$id} =~ tr/-/-/;
+    {
+        my $self = shift;
+        print STDERR "In calc_row_gap_count\n" if $debug;
+        my %gap_count;
+        for my $id (@{$self->{_ids}}) {
+            $gap_count{$id} = $self->{_seqs}->{$id} =~ tr/-/-/;
+        }
+        return \%gap_count;
     }
-    return \%gap_count;
-}
 
-sub delete_gappy_seqs {
-    # remove gappy sequences below minimum occupancy threshold (proportion of non-gap chars)
-    my $self = shift;
-    my $threshold = shift;
-    print STDERR "In delete_gappy_seqs($threshold)\n" if $debug;
-    ($threshold <= 1.0 and $threshold > 0) or die "threshold must be between 0 and 1";
-    my $gap_count = $self->calc_row_gap_count();
+    sub delete_gappy_seqs {
+        # remove gappy sequences below minimum occupancy threshold (proportion of non-gap chars)
+        my $self = shift;
+        my $threshold = shift;
+        print STDERR "In delete_gappy_seqs($threshold)\n" if $debug;
+        ($threshold <= 1.0 and $threshold > 0) or die "threshold must be between 0 and 1";
+        my $gap_count = $self->calc_row_gap_count();
     my $max_gaps = (1.0 - $threshold)*$self->{_length};
     my $index = 0;
     my @retval = ();
@@ -478,14 +471,5 @@ sub delete_gappy_seqs {
     return \@retval
 }    
 
-sub get_sequence_lengths {
-    my $self = shift;
-    print STDERR "In get_sequence_lengths, num ids: ", scalar @{$self->{_ids}}, "\n" if $debug;
-    my %seq_len;
-    for my $id (@{$self->{_ids}}) {
-        $seq_len{$id} = length($self->{_seqs}->{$id});
-    }
-    return \%seq_len;
-}
 
 return 1

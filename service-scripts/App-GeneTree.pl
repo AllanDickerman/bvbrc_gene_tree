@@ -1094,7 +1094,7 @@ sub label_tree_with_metadata {
 
 sub generate_tree_graphic {
     my ($input_newick, $num_tips, $graphic_format) = @_;
-    my ($step_comments, $step_info) = start_step("Generate tree graphic using FigTree");
+    my ($step_comments, $step_info) = start_step("Generate Tree Graphic");
     my $file_base = basename($input_newick);
     $file_base =~ s/\..{2,6}//;
     my $tree_graphic_file = "$file_base." . lc($graphic_format);
