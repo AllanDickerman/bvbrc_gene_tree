@@ -1,0 +1,24 @@
+{
+  "alphabet": "Protein",
+  "output_path": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree",
+  "sequences": [
+    {
+      "type": "feature_group",
+      "filename": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree/Private PBP2x"
+    },
+    {
+      "type": "feature_group",
+      "filename": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree/Amox_Sus_PBP2X"
+    },
+    {
+      "type": "feature_group",
+      "filename": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree/Res_Amox_PBP2X"
+    }
+  ],
+  "trim_threshold": "0",
+  "output_file": "workshop_amoxicillin_pbp2x",
+  "tree_type": "gene",
+  "gap_threshold": "0",
+  "substitution_model": "LG",
+  "recipe": "FastTree"
+}

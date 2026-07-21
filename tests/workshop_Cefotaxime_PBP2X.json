@@ -1,0 +1,20 @@
+{
+  "tree_type": "gene",
+  "trim_threshold": "0",
+  "output_file": "workshop_cefotaxime_pbp2x",
+  "sequences": [
+    {
+      "filename": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree/Cefotaxime resistant heatmap",
+      "type": "feature_group"
+    },
+    {
+      "filename": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree/Susceptible Pbp2x Cefotaxime",
+      "type": "feature_group"
+    }
+  ],
+  "output_path": "/olson@patricbrc.org/PATRIC-QA/applications/App-GeneTree",
+  "alphabet": "DNA",
+  "substitution_model": "GTR",
+  "gap_threshold": "0",
+  "recipe": "FastTree"
+}
