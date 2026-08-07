@@ -14,6 +14,30 @@
             "type": ["aligned_dna_fasta", "aligned_protein_fasta", "feature_dna_fasta", "feature_protein_fasta", "feature_group", "genome_group", "feature_ids"]
         },
         {
+          "id": "genome_selection",
+          "label": "Genome Segment Selection",
+          "required": 0,
+          "type": "group",
+          "group": [
+            {
+              "id": "selected_segments",
+              "label": "Selected Segments",
+              "required": 0,
+              "allow_multiple": 1,
+              "type": "string",
+              "desc": "Segments selected by the user for viral genome group analysis."
+            },
+            {
+              "id": "concat_segments",
+              "label": "Concatenate Selected Segments",
+              "required": 0,
+              "type": "boolean",
+              "desc": "If true, concatenate the selected genome segments before analysis.",
+              "default": false
+            }
+          ]
+        },
+        {
             "id": "alignment_program",
             "label": "Alignment Program",
             "required": 0,
@@ -22,12 +46,14 @@
         {
             "id": "trim_threshold",
             "label": "Alignment End-Trimming Threshold",
+            "desc": "Remove outer columns of alignment until threshold density met.",
             "required": 0,
             "type": "float"
         },
         {
             "id": "gap_threshold",
             "label": "Delete Gappy Sequences Threshold",
+            "desc": "Remove rows of matrix below threshold density.",
             "required": 0,
             "type": "float"
         },
