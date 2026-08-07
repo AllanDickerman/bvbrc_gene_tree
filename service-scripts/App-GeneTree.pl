@@ -9,6 +9,7 @@ use File::Basename;
 use IPC::Run 'run';
 use JSON;
 use File::Copy ('copy', 'move');
+use List::Util ('any');
 use P3DataAPI;
 use Bio::KBase::AppService::AppConfig;
 use Bio::KBase::AppService::AppScript;
@@ -36,8 +37,8 @@ if ($debug) {
 }
 our @analysis_step => ();# collect info on sequence of analysis steps
 our @step_stack => (); # for nesting of child steps within parent steps
-my @original_sequence_ids; # list of items requested, can be different from those actually obtained
-my $sequence_identifier_type; # feature_id or genome_id or user_specified
+#my @original_sequence_ids; # list of items requested, can be different from those actually obtained
+#my $sequence_identifier_type; # feature_id or genome_id or user_specified
 
 my $data_url = Bio::KBase::AppService::AppConfig->data_api_url;
 #$data_url = "https://patricbrc.org/api" if $debug;
@@ -129,9 +130,9 @@ sub end_step {
     my $name = shift;
     print STDERR "end_step($name)\n";
     my $current_step = pop @step_stack;
-    unless ($name eq $current_step) {
-        print STDERR "Problem! at end_step name is wrong: $name should be $current_step";
-    }
+    #unless ($name eq $current_step) {
+    #    print STDERR "Problem! at end_step name is wrong: $name should be $current_step" if $debug;
+    #}
     my $step_index = scalar @analysis_step - 1;
     my $step_info = $analysis_step[$step_index];
     $step_info->{end_time} = time();
@@ -142,40 +143,115 @@ sub add_analysis_step { #allow adding a step recorded by Tree_Builder object
     push @analysis_step, $step_info;
 }
 
+sub build_sequence_length_table {
+    # $lengths is a hashref: {id}{locus} = length, as returned by Sequence_Alignment::get_sequence_lengths
+    # $loci is an arrayref of all locus names known for the alignment (used to decide whether to show per-locus columns)
+    # one row per Sequence ID; one column per locus, unless there is only one locus (then a single Length column)
+    my ($lengths, $loci) = @_;
+    my $multi_locus = (scalar @$loci > 1);
+    my $html = "<table border=\"1\" cellpadding=\"3\" cellspacing=\"0\">\n<tr><th>Sequence ID</th>";
+    if ($multi_locus) {
+        $html .= "<th>$_</th>" for @$loci;
+    }
+    else {
+        $html .= "<th>Length</th>";
+    }
+    $html .= "</tr>\n";
+    for my $id (sort keys %$lengths) {
+        $html .= "<tr><td>$id</td>";
+        if ($multi_locus) {
+            for my $locus (@$loci) {
+                my $length = $lengths->{$id}{$locus};
+                $html .= "<td>" . (defined $length ? $length : '-') . "</td>";
+            }
+        }
+        else {
+            my ($length) = values %{$lengths->{$id}};
+            $html .= "<td>" . (defined $length ? $length : '-') . "</td>";
+        }
+        $html .= "</tr>\n";
+    }
+    $html .= "</table>\n";
+    return $html;
+}
+
+sub add_sequence_summary_step {
+    # record a report step consisting only of a sequence-length table (no command line)
+    my ($name, $lengths, $loci) = @_;
+    my $now = time();
+    add_analysis_step({
+        name => $name,
+        start_time => $now,
+        end_time => $now,
+        table => build_sequence_length_table($lengths, $loci),
+    });
+}
+
+sub build_alignment_occupancy_table {
+    # $occupancy is a hashref: {locus} => { length => alignment length, percent_non_gap => ... }
+    # as returned by Sequence_Alignment::get_alignment_occupancy
+    # $loci is an arrayref of locus names, in the order rows should be listed
+    # one row per locus; Locus column is omitted when there is only one locus
+    my ($occupancy, $loci) = @_;
+    my $multi_locus = (scalar @$loci > 1);
+    my $html = "<table border=\"1\" cellpadding=\"3\" cellspacing=\"0\">\n<tr>";
+    $html .= "<th>Locus</th>" if $multi_locus;
+    $html .= "<th>Alignment Length</th><th>% Non-gap</th></tr>\n";
+    for my $locus (@$loci) {
+        my $length = $occupancy->{$locus}{length};
+        my $percent = $occupancy->{$locus}{percent_non_gap};
+        $html .= "<tr>";
+        $html .= "<td>$locus</td>" if $multi_locus;
+        $html .= "<td>$length</td><td>" . sprintf("%.1f", $percent) . "%</td></tr>\n";
+    }
+    $html .= "</table>\n";
+    return $html;
+}
+
+sub add_alignment_occupancy_step {
+    # record a report step consisting only of a per-locus alignment occupancy table (no command line)
+    my ($name, $occupancy, $loci) = @_;
+    my $now = time();
+    add_analysis_step({
+        name => $name,
+        start_time => $now,
+        end_time => $now,
+        table => build_alignment_occupancy_table($occupancy, $loci),
+    });
+}
+
 sub write_report {
-    my ($output_file, $title, $tree_graphic_file) = @_;
+    my ($output_file, $title, $tree_graphic_files) = @_;
     print STDERR "write_report()\n";
     open F, ">$output_file";
-    print F "<HTML>\n<h1>$title</h1>\n";
-    if (-e $tree_graphic_file) {
-        my $element_name = 'tree_plot';
-        print F "<script>\nfunction toggle_$element_name() {
-          var x = document.getElementById(\"$element_name\");
-            if (x.style.display == \"none\") {
-                  x.style.display = \"block\";
-              } else {
-                  x.style.display = \"none\";
-              }
-          }\n</script>\n";
-        print STDERR "<script>\nfunction toggle_$element_name() \n" if $debug;
-        print F "FigTree Plot: <button onclick=\"toggle_$element_name()\">Show/Hide</button>\n";
-        print F "<div id=\"$element_name\" style=\"display:block; background:#ffffff\" \n";
-        print F "    onclick=\"toggle_$element_name()\">\n";
-        my $svg_text = read_file($tree_graphic_file);
-        print F $svg_text, "\n\n";
-        print F "</div>\n";
+    print F "<HTML>\n<head>\n";
+    print F "<script>\nfunction toggle_visibility(element_name) {
+      var x = document.getElementById(element_name);
+        if (x.style.display == \"none\") {
+              x.style.display = \"block\";
+          } else {
+              x.style.display = \"none\";
+          }
+      }\n</script>\n";
+    print F "</head><body>\n<h1>$title</h1>\n";
+    for my $tree_graphic_file (@$tree_graphic_files) {
+        if (-e $tree_graphic_file) {
+            my $element_name = 'tree_plot_' . $tree_graphic_file;
+            print F "FigTree Plot $tree_graphic_file: <button onclick=\"toggle_visibility('$element_name')\">Show/Hide</button>\n";
+            print F "<div id=\"$element_name\" style=\"display:block; background:#ffffff\" \n";
+            print F "    onclick=\"toggle_visibility('$element_name')\">\n";
+            my $svg_text = read_file($tree_graphic_file);
+            print F $svg_text, "\n</div><br>\n";
+        }
+        else { print STDERR "Tree graphic file not found: $tree_graphic_file\n"; }
     }
-    else { print STDERR "Tree graphic file not found: $tree_graphic_file\n"; }
     print F "<h2>Analysis Steps</h2>\n";
-    my $start_time = $analysis_step[0]->{start_time};
-    my $time_string = localtime($start_time);
-    my $duration = time() - $start_time;
-    print F "<p>Start time $time_string<br>\n";
-    print F "Duration: $duration\n";
     for my $step (@analysis_step) {
         print F "<h3>$step->{name}</h3>\n";
+        if (exists $step->{table}) {
+            print F $step->{table}, "\n";
+        }
         if (exists $step->{command_line}) {
-            print F "<B>command line:</b><br>\n";
             print F "<pre>$step->{command_line}</pre>\n";
         }
         if (exists $step->{comments} and scalar @{$step->{comments}}) {
@@ -186,25 +262,12 @@ sub write_report {
             }
             print F "</ul>\n";
         }
-        if (exists $step->{stdout} and length($step->{stdout}) > 5) {
-            #accommodate steps from Tree_Builder
-            $step->{details} = $step->{stdout};
-        }
         if (exists $step->{details} and $step->{details} =~ /\S/) {
             my $element_name = "$step->{name}_details";
             $element_name =~ tr/ /_/;
-            print F "<script>\nfunction toggle_$element_name() {
-              var x = document.getElementById(\"$element_name\");
-                if (x.style.display == \"none\") {
-                      x.style.display = \"block\";
-                  } else {
-                      x.style.display = \"none\";
-                  }
-              }\n</script>\n";
-            print STDERR "<script>\nfunction toggle_$element_name() \n" if $debug;
-            print F "Details: <button onclick=\"toggle_$element_name()\">Show/Hide</button>\n";
+            print F "Details: <button onclick=\"toggle_visibility('$element_name')\">Show/Hide</button>\n";
             print F "<div id=\"$element_name\" style=\"display:none; background:#f0f0f0\" \n";
-            print F "    onclick=\"toggle_$element_name()\">\n";
+            print F "    onclick=\"toggle_visibility('$element_name')\">\n";
             print F "<pre>\n", $step->{details}, "\n</pre></div>\n";
         }
         my $duration = $step->{end_time} - $step->{start_time};
@@ -212,14 +275,48 @@ sub write_report {
             print F "<p>Duration ", $duration, " seconds.\n";
         }
     }
-    print F "</HTML>\n";
+    my $start_time = $analysis_step[0]->{start_time};
+    my $time_string = localtime($start_time);
+    my $duration = time() - $start_time;
+    print F "<p>Start time $time_string<br>\n";
+    print F "Duration: $duration<br>\n";
+    print F "</body></HTML>\n";
 }
+
+sub validate_genomes_for_viral_tree {
+    my($genome_ids, $api) = @_;
+    print STDERR "examine genome metadata to test for single-sequence virus under $max_genome_length:\n";
+    print STDERR "genome_ids = ", join(", ", @$genome_ids), ".\n";
+    my $genome_validation_fields = ['genome_id', 'contigs', 'superkingdom', 'genome_length'];
+    my @genome_validation_data = $api->retrieve_genome_metadata($genome_ids, $genome_validation_fields);
+    print STDERR join("\t", @$genome_validation_fields), "\n";
+    for my $info (@genome_validation_data) {
+        for my $key ('genome_id', 'contigs', 'superkingdom', 'genome_length') {
+            print STDERR "$info->{$key}\t";
+        }
+        print STDERR "\n";
+        if ($info->{'genome_length'} > $max_genome_length) {
+            print STDERR "Problem: length of genome $info->{'genome_id'} exceeds $max_genome_length ($info->{'genome_length'}).\nExiting.\n";
+            `cd ..`;
+            exit(1);
+        }
+        if ($info->{'superkingdom'} ne 'Viruses') {
+            print STDERR "Problem: superkingdom of genome $info->{'genome_id'} is not 'Viruses' ($info->{'superkingdom'}).\nExiting.\n";
+            `cd ..`;
+            exit(1);
+        }
+        if ($info->{'contigs'} > 1) {
+            print STDERR "Genome $info->{'genome_id'} has multiple contigs (segments) ($info->{'contigs'}).\n";
+        }
+    }
+    print STDERR "All genomes are viruses and all are under $max_genome_length bases.\n";
+}
+
 
 sub retrieve_sequence_data {
     my ($app, $params, $api) = @_;
     my ($step_comments, $step_info) = start_step("Gather Sequence Data");
-    my @master_seq_list; # concatenate seq_list for each data source, return this
-    my %master_seq_ids; # control that sequence IDs are unique (modify user fast IDS, drop repeat feature or genomes)
+    my $seq_al = new Sequence_Alignment(); # object to store sequences
     my $comment;
     my ($aligned_state, $any_in_memory) = (0, 0);
     $aligned_state = (scalar(@{$params->{sequences}}) == 1 and $params->{sequences}->[0]->{type} =~ /Aligned/i); 
@@ -227,8 +324,9 @@ sub retrieve_sequence_data {
     my $total_seqs = 0;
     my @empty_sequences; # keep track of entries lacking sequence data
     for my $sequence_source (@{$params->{sequences}}) {
-        print STDERR "data item: $sequence_source->{type}, $sequence_source->{filename}\n";
-        push @{$step_comments}, "reading $sequence_source->{type} $sequence_source->{filename}";
+        $comment = "fetch $sequence_source->{type} $sequence_source->{filename}";
+        print STDERR $comment;
+        push @{$step_comments}, $comment;
         my $num_seqs = 0;
         if ($sequence_source->{type} =~ /FASTA/i) {
             # then it is one of the fasta formats in the workspace
@@ -236,80 +334,31 @@ sub retrieve_sequence_data {
             $local_file =~ s/.*\///; #remove path, leave filename
             print STDERR "About to copy file $sequence_source->{filename} to $local_file\n";
             $app->workspace->download_file($sequence_source->{filename}, $local_file, 1, $global_token);
-            my @seq_list;
-            open F, $local_file;
-            my $seq_item;
-            while (<F>) {
-                if (/^>(\S+)/) {
-                    my $user_identifier = $1;
-                    push @original_sequence_ids, $user_identifier;
-                    my %temp = ();
-                    $seq_item = \%temp;
-                    push @seq_list, $seq_item;
-                    $seq_item->{id} = $user_identifier;
-                    $seq_item->{user_identifier} = $user_identifier;
-                    $seq_item->{data_source} = $local_file;
-                    $seq_item->{sequence} = '';
-                    if ($user_identifier =~ tr/[]():',/_______/) {
-                        print STDERR "replacing identifier $seq_item->{id} with $user_identifier\n";
-                        $seq_item->{id} = $user_identifier;
-                    }
-                    if (exists $master_seq_ids{$seq_item->{id}}) {
-                        while (exists $master_seq_ids{$seq_item->{id}}) {
-                            $seq_item->{id} .= "_d" # make unique by appending tag
-                        }
-                    }
-                    $master_seq_ids{$seq_item->{id}} = 1; #remember this identifier and protect if from collisions
-                    if ($user_identifier =~ /^fig\|\d+\.\d+\..{3}\.\d+$/) {
-                        print "try user identifier as patric_id: $user_identifier\n" if $debug;
-                        $seq_item->{database_link} = 'patric_id';
-                    }
-                    elsif ($user_identifier =~ /^\w+\.\d+\.\d+\.\w+\.\w+\.\d+\.\d+\.(fwd|rev)$/) {
-                        print "try user identifier as feature_id: $user_identifier\n" if $debug;
-                        $seq_item->{database_link} = 'feature_id';
-                    }
-                    elsif ($user_identifier =~ /(\d+\.\d+$)/) {
-                        print "try user identifier as genome_id $user_identifier\n" if $debug;
-                        $seq_item->{database_link} = 'genome_id';
-                    }
-                    elsif ($user_identifier =~ /(acc\|):?(\d+\.\d+$)/) {
-                        print "try user identifier as genome_id $user_identifier\n" if $debug;
-                        $seq_item->{database_link} = 'genome_id';
-                    }
-                    $num_seqs++;
+            my @ids = $seq_al->read_file($local_file);
+            $num_seqs = scalar @ids;
+            for my $id (@ids) {
+                $seq_al->set_metadata($id, 'source', $local_file); #mark where this data came from
+                if ($id =~ /^fig\|\d+\.\d+\..{3}\.\d+$/) {
+                    print "try user identifier as patric_id: $id\n" if $debug;
+                    $seq_al->set_metadata($id, 'database_link', 'patric_id');
                 }
-                else {
-                    chomp;
-                    $seq_item->{sequence} .= $_;
+                elsif ($id =~ /^\w+\.\d+\.\d+\.\w+\.\w+\.\d+\.\d+\.(fwd|rev)$/) {
+                    print "try user identifier as feature_id: $id\n" if $debug;
+                    $seq_al->set_metadata($id, 'database_link', 'feature_id');
                 }
-            }
-            close F;
-            # save non-empty sequences to master seq list
-            my $num_empty = 0;
-            for my $item (@seq_list) {
-                if (length($item->{sequence}) > 0) {
-                    push @master_seq_list, $item;
+                elsif ($id =~ /(\d+\.\d+$)/) {
+                    print "try user identifier as genome_id $id\n" if $debug;
+                    $seq_al->set_metadata($id, 'database_link', 'genome_id');
                 }
-                else {
-                    push @empty_sequences, $item->{id};
-                    $num_empty++;
+                elsif ($id =~ /(acc\|):?(\d+\.\d+$)/) {
+                    print "try user identifier as genome_id $id\n" if $debug;
+                    $seq_al->set_metadata($id, 'database_link', 'genome_id');
                 }
-            }
-            $comment = "number of sequence entries: $num_seqs";
-            push @{$step_comments}, $comment;
-            print STDERR $comment, "\n";
-            if ($num_empty) {
-                $comment = "number lacking sequence data: $num_empty";
-                push @{$step_comments}, $comment;
-                print STDERR $comment, "\n";
             }
         }
         elsif ($sequence_source->{type} eq "feature_group") {
             # need to get feature sequences from database 
             my $feature_group = $sequence_source->{filename};
-            $comment = "retrieving sequences for feature group $feature_group";
-            print STDERR $comment, "\n";
-            push @{$step_comments}, $comment;
             if ($debug) {
                 my $feature_ids = $api->retrieve_patricids_from_feature_group($feature_group);
                 print STDERR "\nfeature_ids = @$feature_ids\n";
@@ -327,177 +376,80 @@ sub retrieve_sequence_data {
                     print STDERR "    \t$key\t$seq_list->[0]->{$key}\n";
                 }
             }
-            my $num_empty = 0;
             $feature_group =~ s/.*\///; # remove path preceding name of feature group
             for my $item (@$seq_list) {
-                if (exists $master_seq_ids{$item->{feature_id}}) { # block repeats of same feature
-                    print STDERR "got repeat of feature $item->{feature_id}, skipping.\n";
-                }
-                else {
-                    push @original_sequence_ids, $item->{feature_id};
-                    $item->{id} = $item->{feature_id};
-                    $item->{data_source} = $feature_group;
-                    $item->{database_link} = 'feature_id';
-                    $master_seq_ids{$item->{feature_id}} = 1;
-                    if (length($item->{sequence}) > 0) {
-                        push @master_seq_list, $item;# save non-empty sequences to master seq list
-                    }
-                    else {
-                        push @empty_sequences, $item->{id};
-                        $num_empty++;
-                    }
-                }
+               my $id = $seq_al->add_seq($item->{feature_id}, $item->{sequence});
+               $seq_al->set_metadata($id, 'data_source', $feature_group);
+               $seq_al->set_metadata($id, 'database_link', 'feature_id');
             }
             $num_seqs = scalar @$seq_list;
-            $comment = "number of sequence fetures retrieved: $num_seqs";
-            push @{$step_comments}, $comment;
+            $comment = "number of sequence fetures retrieved from $feature_group: $num_seqs";
             print STDERR $comment, "\n";
-            if ($num_empty) {
-                $comment = "number lacking sequence data: $num_empty";
-                push @{$step_comments}, $comment;
-                print STDERR $comment, "\n";
-            }
         }
         elsif ($sequence_source->{type} eq "genome_group") {
-            if (0 and scalar @{$params->{sequences}} > 1) {
-                print STDERR "Genome group $sequence_source->{filename} combined with other sequence inputs. This case is not handled yet. Exiting.\n";
-                `cd ..`; # to allow temp directory to be deleted
-                exit(1);
-            }
             my $genome_group = $sequence_source->{filename};
-            $comment = "retrieving sequences for genome group $genome_group\n";
-            print STDERR "$comment\n";
-            push @{$step_comments}, $comment;
-            my $temp_genome_ids = $api->retrieve_patric_ids_from_genome_group($genome_group);
-            my @genome_ids; # limit to non-redundant entries
-            for my $id (@$temp_genome_ids) {
-                if (exists $master_seq_ids{$id}) {
-                    print STDERR " duplicate genome ID: $id, skipping.\n";
-                }
-                else {
-                    print STDERR " genome $id\n";
-                    push @genome_ids, $id;
-                }
+            my $genome_ids = $api->retrieve_patric_ids_from_genome_group($genome_group);
+            print STDERR "got genome ids: "+join(", ", @$genome_ids), ".\n";
+            #  do we need to validate length and that each is a virus? 
+            #validate_genomes_for_viral_tree($genome_ids, $api);
 
+            my @segments_to_use;
+            if ($params->{genome_selection}{selected_segments}) {
+                print STDERR "Limit analysis to segments: ", join(", ", @{$params->{genome_selection}{selected_segments}}), "\n";
+                @segments_to_use = @{$params->{genome_selection}{selected_segments}};
             }
-            my @genome_validation_fields, ('genome_id', 'contigs', 'superkingdom', 'genome_length');
-            my @genome_validation_data = $api->retrieve_genome_metadata(\@genome_ids, \@genome_validation_fields);
-            print STDERR "examine genome metadata to test for single-sequence virus under $max_genome_length:\n";
-            print STDERR join("\t", @genome_validation_fields), "\n";
-            for my $info (@genome_validation_data) {
-                for my $key ('genome_id', 'contigs', 'superkingdom', 'genome_length') {
-                    print STDERR "$info->{$key}\t";
-                }
-                print STDERR "\n";
-                if ($info->{'genome_length'} > $max_genome_length) {
-                    print STDERR "Problem: length of genome $info->{'genome_id'} exceeds $max_genome_length ($info->{'genome_length'}).\nExiting.\n";
-                    `cd ..`;
-                    exit(1);
-                }
-                if ($info->{'superkingdom'} ne 'Viruses') {
-                    print STDERR "Problem: superkingdom of genome $info->{'genome_id'} is not 'Viruses' ($info->{'superkingdom'}).\nExiting.\n";
-                    `cd ..`;
-                    exit(1);
-                }
-                if ($info->{'contigs'} > 1) {
-                    print STDERR "Problem: genome $info->{'genome_id'} has multiple contigs ($info->{'contigs'}).\nExiting.\n";
-                    `cd ..`;
-                    exit(1);
-                }
-            }
-            print STDERR "All genomes are viruses, all have a single sequence, all are under $max_genome_length bases.\n";
-            push @original_sequence_ids, @genome_ids;
-            $num_seqs = scalar @genome_ids;
-            my $num_empty = 0;
             $genome_group =~ s/.*\///; # remove path preceding name of genome group
-            for my $item (@genome_validation_data) {
-                my $genome_id = $item->{genome_id};
-                my ($resp, $data) = $api->submit_query('genome_sequence', "eq(genome_id,$genome_id)", "sequence");
+            for my $genome_id (@$genome_ids) {
+                my ($resp, $data) = $api->submit_query('genome_sequence', "eq(genome_id,$genome_id)", "sequence,contig");
                 #print "for $genome_id: resp = $resp\tdata=$data\tdata->[0]=$data->[0]\n" if $debug;
-                $item->{sequence} = $data->[0]->{sequence};
-                $item->{id} = $genome_id;
-                $item->{data_source} = $genome_group;
-                $item->{database_link} = 'genome_id';
-            # save non-empty sequences to master seq list
-                if (length($item->{sequence}) > 0) {
-                    push @master_seq_list, $item;
-                }
-                else {
-                    push @empty_sequences, $item->{id};
-                    $num_empty++;
+                for my $record (@$data) {
+                    my $use = 1;
+                    my $locus = undef;
+                    if ($record->{segment}) {
+                        if (@segments_to_use) {
+                            $use = any { $_ eq $record->{segment} } @segments_to_use;
+                        }
+                        $locus = "segment_" . $record->{segment};
+                    }
+                    if ($use) {
+                        my $id = $seq_al->add_seq($genome_id, $record->{sequence}, $locus);
+                        $seq_al->set_metadata($id, "data_source", $genome_group);
+                        $seq_al->set_metadata($id, "database_link", "genome_id");
+                    }
+                    else {
+                        print STDERR "skipping segment $record->{segment} not in segments_to_use\n";
+                    }
                 }
             }
-            $comment = "number of genomes retrieved: $num_seqs";
-            push @{$step_comments}, $comment;
-            print STDERR $comment, "\n";
-            if ($num_empty) {
-                $comment = "number lacking sequence data: $num_empty";
-                push @{$step_comments}, $comment;
-                print STDERR $comment, "\n";
-            }
-
+            $num_seqs = scalar(@$genome_ids);
         }
         elsif ($sequence_source->{type} eq "feature_ids") {
             # need to get feature sequences from database 
-            $comment = "retrieving sequences for feature ids";
-            $comment .= ", this functionality in testing";
-            push @{$step_comments}, $comment;
-            my @feature_ids;
-            for my $feature_id (@{$sequence_source->{feature_ids}}) {
-                if (exists $master_seq_ids{$feature_id}) { # block repeats of same feature
-                    print STDERR "got repeat of feature $feature_id, skipping.\n";
-                }
-                else {
-                    push @feature_ids, $feature_id;
-                    $master_seq_ids{$feature_id} = 1;
-                }
+            my $feature_seq = $api->retrieve_protein_feature_sequence($sequence_source->{feature_ids});
+            for my $patric_id (keys %$feature_seq) {
+                my $id = $seq_al->add_seq($patric_id, $feature_seq->{$patric_id}, "feature_list");
+                $seq_al->set_metadata($id, "database_link", "feature_id");
+                $seq_al->set_metadata($id, "data_source", "feature_list");
             }
-            print STDERR "\tfeature_ids = ", join(", ", @feature_ids), "\n" if $debug;
-            my $query="in(feature_id,(" . join(',', @feature_ids) . "))";
-            my ($req, $seq_list) = $api->submit_query('genome_feature', $query);
-            my @md5_list;
-            my $md5_type = ('aa_sequence_md5', 'na_sequence_md5')[$params->{alphabet} eq 'DNA'];
-            for my $item  (@$seq_list) {
-                push @md5_list, $item->{$md5_type};
-            }
-            my $seqs = $api->lookup_sequence_data_hash(\@md5_list);
-            my $num_empty = 0;
-            for my $item  (@$seq_list) {
-                $item->{sequence} = $seqs->{$item->{$md5_type}};
-                $item->{"database_link"}="feature_id"; 
-                if (length($item->{sequence}) > 0) {
-                    push @master_seq_list, $item;
-                }
-                else {
-                    push @empty_sequences, $item->{id};
-                    $num_empty++;
-                }
-            }
-            $num_seqs = scalar keys %{$sequence_source->{sequences}};
-            $comment = "number of features retrieved: $num_seqs";
-            push @{$step_comments}, $comment;
-            print STDERR $comment, "\n";
-            if ($num_empty) {
-                $comment = "number lacking sequence data: $num_empty";
-                push @{$step_comments}, $comment;
-                print STDERR $comment, "\n";
-            }
+            $num_seqs = scalar keys %{$feature_seq};
         }
+        $comment = "$num_seqs entries retrieved from $sequence_source->{type} $sequence_source->{filename}\n";
+        push @{$step_comments}, $comment;
+        print STDERR $comment;
+    }
+    if (scalar @{$params->{sequences}} > 1) {
+        my $num_seqs = $seq_al->get_ntaxa();
+        $comment = "total sequnces retrieved = $num_seqs\n";
+        push @{$step_comments}, $comment;
+        print STDERR "$comment\n";
     }
     if (scalar @empty_sequences) {
         $comment = "records lacking sequence data: " . join(", ", @empty_sequences);
         push @{$step_comments}, $comment;
         print STDERR "$comment\n";
     }
-    
-    my $num_seqs = scalar @master_seq_list;
-    print STDERR "near end of retrieve_sequence_data, number of sequences is $num_seqs\n" if $debug;
-
-    $comment = $aligned_state ? "sequences are aligned" : "sequences need aligning";
-    push @{$step_comments}, $comment;
-    print STDERR "$comment\n";
     end_step("Gather Sequence Data");
-    return \@master_seq_list;
+    return $seq_al;
 }
 
 sub build_tree {
@@ -513,85 +465,66 @@ sub build_tree {
     system("chmod", "755", "$tmpdir");
     print STDERR "created temp dir: $tmpdir, cleanup = ", !$debug, "\n";
     my $original_wd = getcwd();
-    chdir($tmpdir); # do all work in temporary directory
+    chdir($tmpdir); # do all work in temporary 
    
     my @feature_metadata_fields = @default_feature_metadata_fields;
     if (exists $params->{feature_metadata_fields}) {
         @feature_metadata_fields = @{$params->{feature_metadata_fields}};
     }
     #ensure that feature_id and genome_id are retrieved
-    push @feature_metadata_fields, "feature_id" unless grep(/feature_id/, @feature_metadata_fields);
-    push @feature_metadata_fields, "genome_id" unless grep(/genome_id/, @feature_metadata_fields);
+    push @feature_metadata_fields, "feature_id" unless any { $_ eq 'feature_id'} @feature_metadata_fields;
+    push @feature_metadata_fields, "genome_id" unless any { $_ eq 'genome_id'} @feature_metadata_fields;
 
     my @genome_metadata_fields = @default_genome_metadata_fields;
     if (exists $params->{genome_metadata_fields}) {
         @genome_metadata_fields = @{$params->{genome_metadata_fields}};
     }
 
-    my $seq_list = retrieve_sequence_data($app, $params, $api);
-    my $seqids_are_genome_ids = 0; # indicate whether seq identifiers are links to BVBRC genomes in database
-    my $database_link_type = undef;
-    my $num_seqs = scalar @$seq_list;
+    #my $seq_list = retrieve_sequence_data($app, $params, $api);
+    my $seq_al = retrieve_sequence_data($app, $params, $api);
+    my $num_seqs = $seq_al->get_ntaxa();
     print STDERR "After retrieval, number of sequences is $num_seqs\n" if $debug;
     if ($num_seqs < 4) { #need at least 4 seuqences to build a tree
         print STDERR "After retrieval, number of sequences is $num_seqs, less than 4. Cannot build a tree.\n";
         exit(1);
     }
+    my @loci = $seq_al->get_locus_ids();
+    add_sequence_summary_step("Sequence Summary (Before Alignment)", $seq_al->get_sequence_lengths(), \@loci);
 
     my $is_aligned = 0;
-    my $unaligned_fasta_file = "$params->{output_file}_unaligned.fa";
-    my $aligned_fasta_file = "$params->{output_file}_aligned.fa";
     my $outfile;
     if (scalar @{$params->{sequences}} == 1 and $params->{sequences}->[0]->{type} =~ /Aligned/i) {
-        open $outfile, ">$aligned_fasta_file";
         $is_aligned = 1;
     }
     else {
-        open $outfile, ">$unaligned_fasta_file" or die "could not open fasta file for output";
+        my ($step_comments, $step_info) = start_step("Align Sequences");
+        my ($cmd_lines, $stdout) = $seq_al->align();
+        $step_info->{"command_line"} = join("", @{$cmd_lines});
+        $step_info->{"stdout"} = $stdout;
+        end_step();
     }
-    my $database_link = undef;
-    my %seqs_written;
-    for my $seq_item (@$seq_list) {
-        my $seq_id = $seq_item->{id};
-        #debugging
-        warn "multiple occurrence of $seq_id\n%{$seq_item}\n" if $seqs_written{$seq_id};
-        $seqs_written{$seq_id} = 1;
-
-        print $outfile ">$seq_id\n";
-        #print STDERR "writing sequence for $seq_id\n";
-        my $sequence = $seq_item->{sequence};
-        $sequence =~ tr/-//d unless $is_aligned;
-        print $outfile $sequence, "\n";
-        if (exists $seq_item->{database_link}) {
-            if ($database_link and $database_link ne $seq_item->{database_link}) {
-                print STDERR "Two different database_links available: $database_link ne $seq_item->{database_link}\n";
-            }
-            $database_link = $seq_item->{database_link};
-        }
-    }
-    close $outfile;
-    my $alignment_modified = 0; # flag whether alignment is different from input data 
-    unless ($is_aligned) {
-        #run_muscle($unaligned_file, $aligned_fasta_file);
-        run_mafft($unaligned_fasta_file, $aligned_fasta_file);
-        $alignment_modified = 1;
-    }
-    if ($params->{trim_threshold} or $params->{gap_threshold})
+    if ($params->{trim_threshold})
     {
-        my $trimmed_aligned_file = $aligned_fasta_file;
-        $trimmed_aligned_file =~ s/.afa//;
-        $trimmed_aligned_file =~ s/.fa//;
-        $trimmed_aligned_file =~ s/.fasta//;
-        $trimmed_aligned_file .= "_trimmed.afa";
-        my $retval = trim_alignment($aligned_fasta_file, $trimmed_aligned_file, $params->{trim_threshold}, $params->{gap_threshold});
-        if ($retval) {
-            $alignment_modified = 1;
-            print STDERR "trimmed aligned file written to $trimmed_aligned_file\n" if $debug;
-            $aligned_fasta_file = $trimmed_aligned_file;
-        }
+        my ($step_comments, $step_info) = start_step("End-Trim Alignment");
+        my ($cmd_lines, $stdout) = $seq_al->end_trim($params->{trim_threshold});
+        $step_info->{"command_line"} = join("", @$cmd_lines);
+        $step_info->{"stdout"} = $stdout;
+        end_step();
+    }
+    if ($params->{gap_threshold})
+    {
+        my ($step_comments, $step_info) = start_step("Filter Gappy Seqs");
+        my ($cmd_lines, $stdout) = $seq_al->delete_gappy_seqs($params->{gap_threshold});
+        $step_info->{"command_line"} = join("", @$cmd_lines);
+        $step_info->{"stdout"} = $stdout if $stdout;
+        end_step();
+    }
+    add_alignment_occupancy_step("Alignment Occupancy", $seq_al->get_alignment_occupancy(), \@loci);
+
+    unless ($params->{recipe}) {
+        $params->{recipe} = 'fasttree';
     }
     my $alphabet = $params->{alphabet};
-    push @outputs, [$aligned_fasta_file, "aligned_${alphabet}_fasta"] if $alignment_modified;
     run("echo $tmpdir && ls -ltr $tmpdir") if $debug;
 
     my $model = "LG"; # default for protein
@@ -601,11 +534,6 @@ sub build_tree {
     elsif ($params->{alphabet} =~ /DNA/i) {
         $model = "GTR"
     }
-    my $recipe = "raxml"; #default
-    if (defined $params->{recipe} and $params->{recipe}) {
-        $recipe = lc($params->{recipe})
-    }
-    print STDERR "About to call tree program $recipe\n";
     my @tree_outputs;
 
     my $threads = 2;
@@ -613,83 +541,131 @@ sub build_tree {
         $threads = $ENV{P3_ALLOCATED_CPU};
         print STDERR "P3_ALLOCATED_CPU = $ENV{P3_ALLOCATED_CPU}\n";
     }
-    my $tree_builder = new Tree_Builder($aligned_fasta_file, $alphabet, $threads);
+    print STDERR "Tree program = $params->{recipe}\n";
 
-    if ($model) {
-       $tree_builder->set_model($model);
+    my @segments_to_tree = $seq_al->get_locus_ids();
+    # add the empty locus if we intend to concatenate
+    if ($params->{genome_selection} and $params->{genome_selection}{concat_segments}) {
+        push(@segments_to_tree, "concatenated");
     }
-    $tree_builder->set_output_base($params->{output_file}) if defined $params->{output_file};
-    my $treeFile;
-    my $bootstrap = $params->{bootstrap};
-    if ($recipe eq 'raxml') {
-        $treeFile = $tree_builder->build_raxml_tree($bootstrap);
-    } elsif ($recipe eq 'phyml') {
-        $treeFile = $tree_builder->build_phyml_tree($bootstrap);
-    } elsif ($recipe eq 'fasttree') {
-        $treeFile = $tree_builder->build_fasttree($bootstrap);
-    } else {
-        die "Unrecognized program: $recipe \n";
+    print STDERR "segments to build trees: " . join(" ", @segments_to_tree) . "\n" if $debug;
+
+    my ($step_comments, $step_info) = start_step("Build Tree using $params->{recipe}");
+    for my $alignment_component (@segments_to_tree) {
+        print STDERR "build tree for $alignment_component\n" if $debug;
+        my $alignment_file_base = $params->{output_file};
+        if ($alignment_component ne "default") {
+            $alignment_file_base .= "_$alignment_component";
+        }
+        my $alignment_file = $alignment_file_base . "_aligned.fa";
+        $seq_al->write_fasta($alignment_file, $alignment_component);
+        push @outputs, [$alignment_file, "aligned_${alphabet}_fasta"];
+        if ($params->{recipe} eq 'phyml') {
+            $alignment_file = $alignment_file_base . "_aligned.phy";
+            $seq_al->write_phylip($alignment_file, $alignment_component);
+            push @outputs, [$alignment_file, "phylip"];
+        }
+        print(STDERR "alignment file:  $alignment_file, size=" . -s $alignment_file . "\n") if $debug;
+
+        my $tree_builder = new Tree_Builder($alignment_file);
+        
+        $tree_builder->set_program($params->{recipe});
+
+        if ($model) {
+           $tree_builder->set_model($model);
+        }
+        $tree_builder->set_output_base($alignment_file_base);
+        #if ($params->{bootstrap}) {
+        #    $tree_builder->set_bootstap_reps($params->{bootstrap});
+        #}
+        my $treeFile = $tree_builder->build_tree();
+        $step_info->{command_line} .= "\n" if $step_info->{command_line};
+        $step_info->{command_line} .= $tree_builder->get_analysis_commandline();
+        $step_info->{details} .= "\n" if $step_info->{details};
+        $step_info->{details} .= $tree_builder->get_analysis_stderrout();
+        #my $logFile = $tree_builder->get_analysis_stderrout();
+        push @outputs, ([$treeFile, "nwk"]);
     }
-    for my $index (0..$tree_builder->get_num_analysis_steps()-1) {
-        my $step = $tree_builder->get_analysis_step($index);
-        push @analysis_step, $step;
-    }
-    my $logFile = $tree_builder->get_log_file();
-    push @outputs, ([$treeFile, "nwk"], [$logFile, "txt"]);
+    end_step();
+
+    #push @outputs, ([$logFile, "txt"]);
     # optionally re-write newick file with original sequence IDs if any were altered
-    # not sure we want to do that as it could screw up downstream use of newick data i
-    # (ideally, bad characters should be escaped, but does raxml know about escaped characters?)
-    # generate tree graphic using figtree
-    my $graphic_format = 'SVG';
-    print STDERR "About to call generate_tree_graphic($treeFile, $num_seqs, $graphic_format)\n";
-    my $tree_graphic = generate_tree_graphic($treeFile, $num_seqs, $graphic_format);
-    push @outputs, [$tree_graphic, $graphic_format];
-    print STDERR "tree_file $treeFile\n";
-    if ($database_link) { # use system call to p3x-newick-to-phyloxml 
-        my @command = ('p3x-newick-to-phyloxml', '-r', '[^(,)]+\_\@\_', '-l', $database_link, '-g', join(',',@genome_metadata_fields), '-f', join(',', @feature_metadata_fields)); # minus tree file (add later)
-        my %data_source_count;
-        for my $seq_item (@$seq_list) {
-            my $data_source = $seq_item->{data_source};
+    
+    # generate tree graphic using figtree for all trees generated
+    for my $file_record (@outputs) {
+        if ($file_record->[1] eq 'nwk') {
+            my $treeFile = $file_record->[0];
+            print STDERR "About to call generate_tree_graphic($treeFile, $num_seqs, 'SVG')\n";
+            my $tree_graphic = generate_tree_graphic($treeFile, $num_seqs, 'SVG');
+            push @outputs, [$tree_graphic, 'SVG'];
+            print STDERR "tree_file $treeFile\n";
+        }
+    }
+
+    my %db_link_count;
+    my $database_link = undef;
+    my %data_source_count;
+    my @ids = $seq_al->get_ids();
+    for my $id (@ids) {
+        my $link = $seq_al->get_metadata($id, 'database_link');
+        if ($link) {
+            $database_link = $link unless $database_link;
+            $db_link_count{$link}++;
+            if ($db_link_count{$link} > $db_link_count{$database_link}) {
+                $database_link = $link;
+            }
+            my $data_source = $seq_al->get_metadata($id, 'data_source');
             if ($data_source) {
                 $data_source_count{$data_source}++
             }
         }
-        if ((scalar keys %data_source_count) > 1) {
-            # write data sources to a tsv file and invoke adding it to phyloxml
-            open F, ">data_source.tsv";
-            print F "seq_id\tGroup\n";
-            for my $seq_item (@$seq_list) {
-                my $data_source = "NA";
-                if (exists $seq_item->{data_source}) {
-                    $data_source = $seq_item->{data_source};
-                }
-                print F "$seq_item->{id}\t$data_source\n";
-            }
-            close F;
-            push @command, ("--annotationtsv", "data_source.tsv");
-        }
-        push @command, $treeFile;
-            
-        #debugging
-        print STDERR "execute system call: (as array):\n" . join(' ', @command), "\n";
-        system(@command);
-
-        my $phyloxml_file = undef;
-        opendir my $dir_handle, '.' or die "Couldn't open dir '.': $!";
-        my @files = readdir $dir_handle;
-        for my $file (@files) {
-            $phyloxml_file = $file if ($file =~ /.phyloxml$/);
-        }
-        push @outputs, [$phyloxml_file, "phyloxml"];
     }
     
+    my @command = ('p3x-newick-to-phyloxml', '-r', '[^(,)]+\_\@\_');
+    if ($database_link) { # activate metadata retrieval from database
+        push @command, ('-l', $database_link, '-g', join(',',@genome_metadata_fields), '-f', join(',', @feature_metadata_fields));
+    }
+    if ((scalar keys %data_source_count) > 1) {
+        # write data sources to a tsv file and invoke adding it to phyloxml
+        open F, ">data_source.tsv";
+        print F "seq_id\tGroup\n";
+        for my $id (@ids) {
+            my $data_source = $seq_al->get_metadata($id, 'data_source'); 
+            $data_source = "NA" unless $data_source;
+            print F "$id\t$data_source\n";
+        }
+        close F;
+        push @command, ("--annotationtsv", "data_source.tsv");
+    }
+    my ($step_comments, $step_info) = start_step("Format Tree to PhyloXML");
+    for my $file_record (@outputs) {
+        if ($file_record->[1] eq 'nwk') {
+            my $treeFile = $file_record->[0];
+            print STDERR "About to call p3x-newick-to-phyloxml on $treeFile\n" if $debug;
+            print STDERR "run: " . join(' ', (@command, $treeFile)), "\n";
+            $step_info->{command_line} = join(' ', (@command, $treeFile)) . "\n";
+            my $ok = IPC::Run::run([@command, $treeFile]);
+            my $phyloxml_file = $treeFile;
+            $phyloxml_file =~ s/.nwk//;
+            $phyloxml_file .= ".phyloxml";
+            push @outputs, [$phyloxml_file, "phyloxml"];
+        }
+    }
+    end_step();
+     
     my $html_file = "$params->{output_file}_gene_tree_report.html";
     my $report_title = "Gene Tree Report";
     if ($params->{tree_type} eq 'viral_genome') {
         $html_file = "$params->{output_file}_virus_genome_tree_report.html";
         $report_title = "Virus Genome Tree Report";
     }
-    write_report($html_file, $report_title, $tree_graphic);
+    my @tree_graphic_files;
+    for my $file_record (@outputs) {
+        if ($file_record->[1] eq 'SVG') {
+            push @tree_graphic_files, $file_record->[0];
+        }
+    }
+    write_report($html_file, $report_title, \@tree_graphic_files);
     push @outputs, [$html_file, "html"];
 
     print STDERR '\@outputs = '. Dumper(\@outputs);
@@ -739,277 +715,6 @@ sub select_sequence_identifier {
     return $seq_data->{genome_id} if exists $seq_data->{genome_id};
     return $seq_data->{user_identifier} if exists $seq_data->{user_identifier};
     die "Couldn't find a usable sequence identifier for seq_data $seq_data";
-}
-
-sub trim_alignment {
-    my ($aligned_fasta_file, $trimmed_aligned_file, $trim_threshold, $gap_threshold) = @_;
-    my ($trim_comments, $trim_info) = start_step("Trim Alignment");
-    my $comment = "performing trimming on alignment: trim_threshod=$trim_threshold, gap_threhold=$gap_threshold";
-    print STDERR "$comment\n";
-    push @{$trim_comments}, $comment;
-    my $alignment = new Sequence_Alignment($aligned_fasta_file);
-    print STDERR "trim_alignment: alignment=$alignment\n" if $debug;
-    $trim_info->{details} = "Before trimming:\n" .  $alignment->write_stats();
-    my $alignment_changed = 0;
-    if ($trim_threshold > 0) {
-        $comment = "trim ends of alignment to density $trim_threshold";
-        print STDERR "$comment\n";
-        push @{$trim_comments}, $comment;
-        my ($left_trim_cols, $right_trim_cols) = $alignment->end_trim($trim_threshold);
-        if ($left_trim_cols or $right_trim_cols) {
-            $comment = "ends trimmed: $left_trim_cols columns on left, $right_trim_cols columns on right.";
-            print STDERR "$comment\n";
-            push @{$trim_comments}, $comment;
-            $alignment_changed = 1;
-        }
-        else {
-            $comment = "no end-columns needed to be trimmed";
-            push @{$trim_comments}, $comment;
-            print STDERR "$comment\n";
-        }
-    }
-    if ($gap_threshold > 0) {
-        $comment = "delete any sequences with gap proportion greater than $gap_threshold";
-        print STDERR "$comment\n";
-        push @{$trim_comments}, $comment;
-        my $deleted_seqs = $alignment->delete_gappy_seqs($gap_threshold);
-        if (scalar @$deleted_seqs) {
-            $comment = scalar(@$deleted_seqs) . " gappy sequences deleted: ". join(", ", @$deleted_seqs);
-            print STDERR "$comment\n";
-            push @{$trim_comments}, $comment;
-            $alignment_changed = 1;
-        }
-        else {
-            $comment = "no sequences needed to be deleted";
-            push @{$trim_comments}, $comment;
-            print STDERR "$comment\n";
-        }
-    }
-    if ($alignment_changed) {
-        $trim_info->{details} .= "After trimming:\n" . $alignment->write_stats();
-    }
-    my $total_seqs = $alignment->get_ntaxa();
-    if ($total_seqs < 4) {
-        $comment = "total sequences: $total_seqs, too few to build a tree (minimum 4)";
-        push @{$trim_comments}, $comment;
-        print STDERR "$comment\n";
-    }
-    if ($alignment_changed) {
-        $alignment->write_fasta($trimmed_aligned_file); 
-        $comment = "writing trimmed alignment to $trimmed_aligned_file\n";
-        push @{$trim_comments}, $comment;
-        print STDERR $comment;
-    }
-    end_step("Trim Alignment");
-    return $alignment_changed;
-}
-
-sub run_raxml {
-    my ($alignment_file, $alphabet, $model, $output_name, $bootstrap) = @_;
-    my ($step_comments, $step_info) = start_step("Phylogenetic Inference with RAxML");
-    print STDERR "In run_raxml (with RELL support), alignment = $alignment_file\n";
-    my $parallel = $ENV{P3_ALLOCATED_CPU};
-    $parallel = 2 if $parallel < 2;
-    
-    my $cwd = getcwd();
-    $model = uc($model); 
-    if ($alphabet eq 'DNA') {
-        $model = 'GTRGAMMA'
-    }
-    else {
-        $model = 'LG' if $model !~ /DAYHOFF|DCMUT|JTT|MTREV|WAG|RTREV|CPREV|VT|BLOSUM62|MTMAM|LG|MTART|MTZOA|PMB|HIVB|HIVW|JTTDCMUT|FLU|STMTREV|DUMMY|DUMMY2|AUTO|LG4M|LG4X|PROT_FILE|GTR_UNLINKED|GTR/i;
-        $model = "PROTCAT". $model;
-    }
-
-    my @cmd = ("raxmlHPC-PTHREADS-SSE3");
-    push @cmd, ("-T", $parallel);
-    push @cmd, ("-p", "12345");
-    push @cmd, ("-m", $model);
-    push @cmd, ("-s", basename($alignment_file));
-    push @cmd, ("-n", $output_name);
-    my $support_trees;
-    if ($bootstrap) {
-        push @cmd, ("-f",  "d"); # just do ML search (generate bootstrap trees separately later)
-        $support_trees = "RAxML_bootstrap." . $output_name . "_bootstrap";
-    }
-    else {
-        push @cmd, ("-f", "D"); # generate RELL replicate trees
-        $support_trees = "RAxML_rellBootstrap." . $output_name;
-    }
-    
-    my $comment = "command = ". join(" ", @cmd);
-    push @{$step_comments}, $comment;
-    print STDERR "$comment\n\n";
-   
-    my ($out, $err) = run_cmd(\@cmd);
-    print STDERR "STDOUT:\n$out\n";
-    print STDERR "STDERR:\n$err\n";
-    #$step_info->{details} = $out;
-
-    if ($bootstrap) {
-        if ($alphabet eq 'DNA') {
-            $model = 'GTRCAT'
-        }
-        @cmd = ("raxmlHPC-PTHREADS-SSE3");
-        push @cmd, ("-T", $parallel);
-        push @cmd, ("-m", $model);
-        push @cmd, ("-s", basename($alignment_file));
-        push @cmd, ("-n", $output_name . "_bootstrap");
-        push @cmd, ("-b",  "12345", "-#", $bootstrap, "-p", "12345");
-        ($out, $err) = run_cmd(\@cmd);
-    }
-    # now map replicate support numbers onto ML tree (from either bootstrap or RELL output)
-    @cmd = ("raxmlHPC-PTHREADS-SSE3", "-f", "b", "-m", "GTRCAT"); #to map RELL bootstrap support onto ML tree
-    push @cmd, ("-t", "RAxML_bestTree.".$output_name);
-    push @cmd, ("-z", $support_trees);
-    push @cmd, ("-n", $output_name . "_support");
-    print STDERR "Map support values onto ML tree:\n", join(" ", @cmd), "\n";
-    my ($out, $err) = run_cmd(\@cmd);
-    print STDERR "STDOUT:\n$out\n";
-    print STDERR "STDERR:\n$err\n";
-    #$step_info->{details} .= $out;
-    
-    my @outputs;
-    my $treeFile = $output_name . "_raxml_tree.nwk";
-    move("RAxML_bipartitions.".$output_name. "_support", $treeFile);
-    my $logFile = $output_name . "_raxml_log.txt";
-    move("RAxML_info.".$output_name . "_support", $logFile);
-    #my $details = read_file($logFile);
-    #$step_info->{details} .= $details;
-    push @outputs, [$treeFile, 'nwk'];
-    push @outputs, [$logFile, 'txt'];
-
-    run("ls -ltr");
-    #end_step("Phylogenetic Inference with RAxML");
-    return @outputs;
-}
-
-sub run_phyml {
-    my ($alignment_file, $alphabet, $model, $output_name, $bootstrap) = @_;
-    #my ($step_comments, $step_info) = start_step("Phylogenetic Inference with Phyml");
-
-    my $cwd = getcwd();
-    
-    my $datatype = 'aa';
-    if ($alphabet =~ /DNA/i) {
-        $datatype = 'nt';
-        $model = 'GTR' if $model !~ /HKY85|JC69|K80|F81|F84|TN93|GTR/;
-    }
-    else {
-        $model = 'LG' if $model !~ /WAG|JTT|MtREV|Dayhoff|DCMut|RtREV|CpREV|VT|AB|Blosum62|MtMam|MtArt|HIVw|HIVb/;
-    }
-
-    my @cmd = ("phyml");
-    push @cmd, ("-i", $alignment_file);
-    push @cmd, ("-d", $datatype);
-    push @cmd, ("-m", $model);
-    if ($bootstrap) {
-        push @cmd, ("-b", $bootstrap); # normal bootstrap replicates
-    }
-    else {
-        push @cmd, ("-b", '-3'); # -1 gives approximate Likelihood Ratio Tests
-        # -2 give Chi2-based parametric branch supports
-        # -3 gives Shimodaira-Hasegawa (SH) support values
-    }
-    
-    my $comment = "command = ". join(" ", @cmd);
-    #push @{$step_comments}, $comment;
-    print STDERR "$comment\n\n";
-   
-    my ($out, $err) = run_cmd(\@cmd);
-    print STDERR "STDOUT:\n$out\n";
-    print STDERR "STDERR:\n$err\n";
-    #$step_info->{details} = $out;
-    #$step_info->{stderr} = $err;
-    #my $comment = "return code = $rc\n";
-    #push @{$step_comments}, $comment;
-    
-    my @outputs;
-    my $treeFile = $output_name."_phyml_tree.nwk";
-    move($alignment_file."_phyml_tree.txt", $treeFile);
-    my $logFile = $output_name."_phyml_log.txt";
-    move($alignment_file."_phyml_stats.txt", $logFile);
-    my $details = read_file($logFile);
-    #$step_info->{details} .= $details;
-    push @outputs, [$treeFile, 'nwk'];
-    push @outputs, [$logFile, 'txt'];
-
-    run("ls -ltr");
-
-    #end_step("Phylogenetic Inference with Phyml");
-    return @outputs;
-}
-
-sub run_fasttree {
-    my ($alignment_file, $alphabet, $model, $output_name, $bootstrap) = @_;
-    #my ($step_comments, $step_info) = start_step("Phylogenetic Inference with FastTree");
-    my $treeFile = $output_name."_fasttree.nwk";
-    my @cmd = ("FastTree", "-out", $treeFile);
-    if ($alphabet =~ /DNA/i) {
-        push @cmd, "-nt", "-gtr";
-    }
-    else {
-        $model = 'lg' if $model !~ /lg|wag/i;
-        $model = lc($model);
-        push @cmd, "-$model";
-    }
-
-    push @cmd, $alignment_file;
-    my $comment = join(" ", @cmd);
-    #push @{$step_comments}, $comment; 
-    print STDERR $comment . "\n\n";
-   
-    my ($out, $err) = run_cmd(\@cmd);
-    print STDERR "STDOUT:\n$out\n";
-    print STDERR "STDERR:\n$err\n";
-
-    if ($bootstrap) {
-        # use raxml to generate 100 data matrices
-        # use fasttree to analyze them
-        # use compareToBootstrap to count the per-branch support (as proportion)
-        @cmd = "raxmlHPC-PTHREADS-SSE3  -f j -b 123 -# $bootstrap -s $alignment_file -n boot_matrix -m GTRCAT";
-        print STDERR "Generate bootstrap matrices:\n" . join(" ", @cmd) . "\n";
-        system(@cmd);
-        die "raxml failed to produce BS1" unless -f "$alignment_file.BS1";
-        my $multi_alignment_file = $alignment_file;
-        $multi_alignment_file =~ s/\.{3,7}$//;
-        $multi_alignment_file .= "_${bootstrap}BS.phy";
-        @cmd = ("cat", "$alignment_file.BS*", ">", $multi_alignment_file);
-        print STDERR "Concatenate into one file:\n" . join(" ", @cmd) . "\n";
-        system(join(" ", @cmd)); # requires shell interpolation
-        system("rm $alignment_file.BS*"); #allow shell expansion
-        my $multi_tree_file = "multiple_bootstrap_trees.nwk";
-        @cmd = ("FastTree", "-n", $bootstrap, "-out", $multi_tree_file);
-        if ($alphabet =~ /DNA/i) {
-            push @cmd, "-nt", "-gtr";
-        }
-        else {
-            push @cmd, "-$model";
-        }
-        push @cmd, $multi_alignment_file;
-        print STDERR "Generate trees for each bootstrapped data matrix:\n" . join(" ", @cmd) . "\n";
-        system(@cmd);
-        die "FastTree did not generate multiple tree file from boostrapped matrices" unless -f $multi_tree_file;
-        my $tree_with_support = $output_name."_fasttree_boostrap_prop.nwk"; 
-        @cmd = ("CompareToBootstrap", $treeFile, $multi_tree_file, ">", $tree_with_support);
-        print STDERR "Map support onto best tree:\n" . join(" ", @cmd) . "\n";
-        system(join(' ', @cmd));
-        die "CompareToBootstrap did not generate tree with support values" unless -s $tree_with_support;
-        $treeFile = $tree_with_support;
-    }
-
-    #$step_info->{details} = $err;
-    
-    my @outputs;
-    my $logFile = $output_name."_fasttree_log.txt";
-    write_file($logFile, $err);
-    push @outputs, [$treeFile, 'nwk'];
-    push @outputs, [$logFile, 'txt'];
-
-    run("ls -ltr");
-
-    #end_step("Phylogenetic Inference with FastTree");
-    return @outputs;
 }
 
 sub retrieve_feature_metadata_by_patric_id {
@@ -1120,52 +825,20 @@ sub generate_tree_graphic {
 
     my @cmd = ("figtree", "-graphic", $graphic_format);
     
-    if ($num_tips > 40) {
-        my $height = 600 + 15 * ($num_tips - 40); # this is an empirical correction factor to avoid taxon name overlap
+    if ($num_tips > 3) {
+        my $height = 20 + 18 * ($num_tips); # this is an empirical correction factor to avoid taxon name overlap
         push @cmd, '-height', $height;
     }
     push @cmd, $nexus_file, $tree_graphic_file;
     $comment = join(" ", @cmd);
-    add_step_command_line(join(" ", @cmd));
+    $step_info->{command_line} = $comment;
     print STDERR "$comment\n";
 
     my ($stdout, $stderr) =  run_cmd(\@cmd);
     $step_info->{stdout} = $stdout;
     $step_info->{stderr} = $stderr;
-    end_step("Generate Tree Graphic");
+    end_step();
     return $tree_graphic_file;
-}
-
-sub run_muscle {
-    my ($unaligned, $aligned) = @_;
-    print STDERR "run_muscle($unaligned, $aligned)\n";
-    my ($step_comments, $step_info) = start_step("Align with muscle");
-    my $cmd = ["muscle", "-in", $unaligned, "-out", $aligned];
-    my $comment = join(" ", @$cmd);
-    add_step_command_line($comment);
-    print STDERR $comment, "\n" if $debug;
-    my ($stdout, $stderr) =  run_cmd($cmd);
-    $step_info->{details} = $stderr;
-    end_step("Align with muscle");
-}
-
-sub run_mafft {
-    my ($unaligned, $aligned) = @_;
-    print STDERR "run_mafft($unaligned, $aligned)\n";
-    my ($step_comments, $step_info) = start_step("Align with mafft");
-    my $parallel = $ENV{P3_ALLOCATED_CPU};
-    my $cmd = ["mafft", "--auto"];
-    if ($parallel) {
-        push @$cmd, "--thread", $parallel;
-    }
-    push @$cmd, $unaligned;
-    my $comment = join(" ", @$cmd);
-    add_step_command_line($comment);
-    print STDERR $comment, "\n" if $debug;
-    my $out;
-    open $out, ">$aligned";
-    run($cmd, ">", $out);
-    end_step("Align with mafft");
 }
 
 sub curl_text {
