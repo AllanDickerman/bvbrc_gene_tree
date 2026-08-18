@@ -342,7 +342,7 @@ sub build_phyml_tree {
     $self->add_analysis_out_err($out, $err);
     print STDOUT "phmyl stdout:\n$out\n";
 
-    my $treeFile = $self->{_output_base} . "_phyml_tree.nwk";
+    my $treeFile = $self->{_output_base} . "_phyml.nwk";
     move($self->{_alignment_file}."_phyml_tree.txt", "$self->{_original_dir}/$treeFile");# copy final tree to original working directory
     $self->add_analysis_tree($treeFile);
     my $logFile = $self->{_output_base} . "_phyml_log.txt";

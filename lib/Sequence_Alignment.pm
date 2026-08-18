@@ -34,7 +34,7 @@ sub set_debug {my $onoff = shift; $debug = $onoff ? 1 : 0}
 sub get_ntaxa { my $self = shift; return scalar(@{$self->{_ids}})}
 sub get_length { 
     my ($self, $locus) = @_; 
-    if ($locus) {
+    if (any {$locus eq $_} @{$self->{_loci}} ) {
         return($self->{_length}{$locus})
     }
     else {
@@ -323,7 +323,7 @@ sub write_to_file {
     }
     my $max_id_length = 0;
     if ($format eq 'phylip') {
-        print $out $self->get_ntaxa(), "  ", $self->get_length(), "\n";
+        print $out $self->get_ntaxa(), "  ", $self->get_length($locus), "\n";
         for my $id (@ids) {
             if (length($id) > $max_id_length) {
                 $max_id_length = length($id);
@@ -537,19 +537,17 @@ sub calc_row_gap_count {
     return \%gap_count;
 }
 
-sub get_alignment_occupancy {
-    # returns hashref: {locus} => { length => alignment length, percent_non_gap => percentage of non-gap characters }
+sub get_sequence_occupancy {
+    # returns hashref: {id}{locus} = percentage of non-gap characters in that id's aligned sequence at that locus
+    # ids lacking a sequence at a given locus simply have no entry there (caller can detect via exists)
     my $self = shift;
     my %occupancy;
     for my $locus (@{$self->{_loci}}) {
         my $length = $self->{_length}{$locus};
         my $gaps_per_seq = $self->calc_row_gap_count($locus);
-        my $num_seqs = scalar keys %$gaps_per_seq;
-        my $total_gaps = 0;
-        $total_gaps += $_ for values %$gaps_per_seq;
-        my $total_chars = $length * $num_seqs;
-        my $percent_non_gap = $total_chars ? 100 * (1 - $total_gaps / $total_chars) : 0;
-        $occupancy{$locus} = { length => $length, percent_non_gap => $percent_non_gap };
+        for my $id (keys %$gaps_per_seq) {
+            $occupancy{$id}{$locus} = $length ? 100 * (1 - $gaps_per_seq->{$id} / $length) : 0;
+        }
     }
     return \%occupancy;
 }

@@ -37,8 +37,6 @@ if ($debug) {
 }
 our @analysis_step => ();# collect info on sequence of analysis steps
 our @step_stack => (); # for nesting of child steps within parent steps
-#my @original_sequence_ids; # list of items requested, can be different from those actually obtained
-#my $sequence_identifier_type; # feature_id or genome_id or user_specified
 
 my $data_url = Bio::KBase::AppService::AppConfig->data_api_url;
 #$data_url = "https://patricbrc.org/api" if $debug;
@@ -188,35 +186,40 @@ sub add_sequence_summary_step {
 }
 
 sub build_alignment_occupancy_table {
-    # $occupancy is a hashref: {locus} => { length => alignment length, percent_non_gap => ... }
-    # as returned by Sequence_Alignment::get_alignment_occupancy
-    # $loci is an arrayref of locus names, in the order rows should be listed
-    # one row per locus; Locus column is omitted when there is only one locus
-    my ($occupancy, $loci) = @_;
-    my $multi_locus = (scalar @$loci > 1);
-    my $html = "<table border=\"1\" cellpadding=\"3\" cellspacing=\"0\">\n<tr>";
-    $html .= "<th>Locus</th>" if $multi_locus;
-    $html .= "<th>Alignment Length</th><th>% Non-gap</th></tr>\n";
-    for my $locus (@$loci) {
-        my $length = $occupancy->{$locus}{length};
-        my $percent = $occupancy->{$locus}{percent_non_gap};
-        $html .= "<tr>";
-        $html .= "<td>$locus</td>" if $multi_locus;
-        $html .= "<td>$length</td><td>" . sprintf("%.1f", $percent) . "%</td></tr>\n";
+    # $occupancy is a hashref: {id}{locus} = percent non-gap, as returned by Sequence_Alignment::get_sequence_occupancy
+    # $loci is an arrayref of locus names, in the order columns should be listed
+    # $lengths is a hashref: {locus} = alignment length, reported once (not per Sequence ID)
+    # one row per Sequence ID, one column per locus; 'NA' where an id has no sequence at a locus
+    my ($occupancy, $loci, $lengths) = @_;
+
+    my $html = "<table border=\"1\" cellpadding=\"3\" cellspacing=\"0\">\n<tr><th>Sequence ID</th>";
+    $html .= "<th>$_</th>" for @$loci;
+    $html .= "</tr>\n";
+    $html .= "<tr><td>Alignment Length</td>";
+    $html .= "<td>$lengths->{$_}</td>" for @$loci;
+    $html .= "</tr>\n";
+    $html .= "<tr><td colspan='" . (scalar(@$loci)+1) . "'>Alignment Occupancy (%non-gap)</td></tr>";
+    for my $id (sort keys %$occupancy) {
+        $html .= "<tr><td>$id</td>";
+        for my $locus (@$loci) {
+            my $percent = $occupancy->{$id}{$locus};
+            $html .= "<td>" . (defined $percent ? sprintf("%.1f", $percent) . "%" : 'NA') . "</td>";
+        }
+        $html .= "</tr>\n";
     }
     $html .= "</table>\n";
     return $html;
 }
 
 sub add_alignment_occupancy_step {
-    # record a report step consisting only of a per-locus alignment occupancy table (no command line)
-    my ($name, $occupancy, $loci) = @_;
+    # record a report step consisting only of alignment occupancy tables (no command line)
+    my ($name, $occupancy, $loci, $lengths) = @_;
     my $now = time();
     add_analysis_step({
         name => $name,
         start_time => $now,
         end_time => $now,
-        table => build_alignment_occupancy_table($occupancy, $loci),
+        table => build_alignment_occupancy_table($occupancy, $loci, $lengths),
     });
 }
 
@@ -227,19 +230,24 @@ sub write_report {
     print F "<HTML>\n<head>\n";
     print F "<script>\nfunction toggle_visibility(element_name) {
       var x = document.getElementById(element_name);
+      var y = document.getElementById(element_name + '_visctrl');
+      console.log(`toggle_visibility(\${element_name}), x.display=\${x.style.display}, y.ih=\${y.innerHTML}`);
         if (x.style.display == \"none\") {
               x.style.display = \"block\";
+              y.innerHTML = 'Hide';
           } else {
               x.style.display = \"none\";
+              y.innerHTML = 'Show';
           }
       }\n</script>\n";
     print F "</head><body>\n<h1>$title</h1>\n";
     for my $tree_graphic_file (@$tree_graphic_files) {
         if (-e $tree_graphic_file) {
             my $element_name = 'tree_plot_' . $tree_graphic_file;
-            print F "FigTree Plot $tree_graphic_file: <button onclick=\"toggle_visibility('$element_name')\">Show/Hide</button>\n";
+            print F "FigTree Plot $tree_graphic_file: <button id=\"${element_name}_visctrl\" onclick=\"toggle_visibility('$element_name')\">Hide</button>\n";
             print F "<div id=\"$element_name\" style=\"display:block; background:#ffffff\" \n";
-            print F "    onclick=\"toggle_visibility('$element_name')\">\n";
+            #print F "    onclick=\"toggle_visibility('$element_name')";
+            print F "\">\n";
             my $svg_text = read_file($tree_graphic_file);
             print F $svg_text, "\n</div><br>\n";
         }
@@ -265,21 +273,21 @@ sub write_report {
         if (exists $step->{details} and $step->{details} =~ /\S/) {
             my $element_name = "$step->{name}_details";
             $element_name =~ tr/ /_/;
-            print F "Details: <button onclick=\"toggle_visibility('$element_name')\">Show/Hide</button>\n";
+            print F "Details: <button id=\"${element_name}_visctrl\" onclick=\"toggle_visibility('$element_name')\">Show</button>\n";
             print F "<div id=\"$element_name\" style=\"display:none; background:#f0f0f0\" \n";
             print F "    onclick=\"toggle_visibility('$element_name')\">\n";
             print F "<pre>\n", $step->{details}, "\n</pre></div>\n";
         }
         my $duration = $step->{end_time} - $step->{start_time};
         if ($duration > 10) { 
-            print F "<p>Duration ", $duration, " seconds.\n";
+            print F "<p>Duration ", $duration, " seconds\n";
         }
     }
     my $start_time = $analysis_step[0]->{start_time};
     my $time_string = localtime($start_time);
     my $duration = time() - $start_time;
     print F "<p>Start time $time_string<br>\n";
-    print F "Duration: $duration<br>\n";
+    print F "Duration: $duration seconds<br>\n";
     print F "</body></HTML>\n";
 }
 
@@ -395,8 +403,10 @@ sub retrieve_sequence_data {
 
             my @segments_to_use;
             if ($params->{genome_selection}{selected_segments}) {
-                print STDERR "Limit analysis to segments: ", join(", ", @{$params->{genome_selection}{selected_segments}}), "\n";
                 @segments_to_use = @{$params->{genome_selection}{selected_segments}};
+                $comment = "limit analysis to segments: " . join(" ",@segments_to_use) . "\n";
+                push @{$step_comments}, $comment;
+                print STDERR $comment;
             }
             $genome_group =~ s/.*\///; # remove path preceding name of genome group
             for my $genome_id (@$genome_ids) {
@@ -489,7 +499,7 @@ sub build_tree {
         exit(1);
     }
     my @loci = $seq_al->get_locus_ids();
-    add_sequence_summary_step("Sequence Summary (Before Alignment)", $seq_al->get_sequence_lengths(), \@loci);
+    add_sequence_summary_step("Sequence Lengths", $seq_al->get_sequence_lengths(), \@loci);
 
     my $is_aligned = 0;
     my $outfile;
@@ -519,7 +529,8 @@ sub build_tree {
         $step_info->{"stdout"} = $stdout if $stdout;
         end_step();
     }
-    add_alignment_occupancy_step("Alignment Occupancy", $seq_al->get_alignment_occupancy(), \@loci);
+    my %locus_lengths = map { $_ => $seq_al->get_length($_) } @loci;
+    add_alignment_occupancy_step("Alignment Summary", $seq_al->get_sequence_occupancy(), \@loci, \%locus_lengths);
 
     unless ($params->{recipe}) {
         $params->{recipe} = 'fasttree';
@@ -558,12 +569,14 @@ sub build_tree {
             $alignment_file_base .= "_$alignment_component";
         }
         my $alignment_file = $alignment_file_base . "_aligned.fa";
-        $seq_al->write_fasta($alignment_file, $alignment_component);
-        push @outputs, [$alignment_file, "aligned_${alphabet}_fasta"];
-        if ($params->{recipe} eq 'phyml') {
+        if ($params->{recipe} =~ /PhyML/i) {
             $alignment_file = $alignment_file_base . "_aligned.phy";
             $seq_al->write_phylip($alignment_file, $alignment_component);
-            push @outputs, [$alignment_file, "phylip"];
+            push @outputs, [$alignment_file, "txt", "detail_files"]; # phylip is not a currently supported file type 
+        }
+        else {
+            $seq_al->write_fasta($alignment_file, $alignment_component);
+            push @outputs, [$alignment_file, "aligned_${alphabet}_fasta", "detail_files"];
         }
         print(STDERR "alignment file:  $alignment_file, size=" . -s $alignment_file . "\n") if $debug;
 
@@ -584,23 +597,25 @@ sub build_tree {
         $step_info->{details} .= "\n" if $step_info->{details};
         $step_info->{details} .= $tree_builder->get_analysis_stderrout();
         #my $logFile = $tree_builder->get_analysis_stderrout();
-        push @outputs, ([$treeFile, "nwk"]);
+        push @outputs, ([$treeFile, "nwk", "detail_files"]);
     }
     end_step();
 
-    #push @outputs, ([$logFile, "txt"]);
-    # optionally re-write newick file with original sequence IDs if any were altered
-    
+    my ($step_comments, $step_info) = start_step("Generate Tree Graphic");
     # generate tree graphic using figtree for all trees generated
     for my $file_record (@outputs) {
         if ($file_record->[1] eq 'nwk') {
             my $treeFile = $file_record->[0];
             print STDERR "About to call generate_tree_graphic($treeFile, $num_seqs, 'SVG')\n";
-            my $tree_graphic = generate_tree_graphic($treeFile, $num_seqs, 'SVG');
-            push @outputs, [$tree_graphic, 'SVG'];
+            my ($tree_graphic, $command_line, $stdouterr) = generate_tree_graphic($treeFile, $num_seqs, 'SVG');
+            push @outputs, [$tree_graphic, 'SVG', "detail_files"];
             print STDERR "tree_file $treeFile\n";
+            $step_info->{command_line} .= "\n" if $step_info->{command_line};
+            $step_info->{command_line} .= $command_line;
+            $step_info->{details} .= $stdouterr;
         }
     }
+    end_step();
 
     my %db_link_count;
     my $database_link = undef;
@@ -621,7 +636,7 @@ sub build_tree {
         }
     }
     
-    my @command = ('p3x-newick-to-phyloxml', '-r', '[^(,)]+\_\@\_');
+    my @command = ('p3x-newick-to-phyloxml');
     if ($database_link) { # activate metadata retrieval from database
         push @command, ('-l', $database_link, '-g', join(',',@genome_metadata_fields), '-f', join(',', @feature_metadata_fields));
     }
@@ -637,13 +652,14 @@ sub build_tree {
         close F;
         push @command, ("--annotationtsv", "data_source.tsv");
     }
+    push @command, '-r', '[^(,)]+\_\@\_';
     my ($step_comments, $step_info) = start_step("Format Tree to PhyloXML");
     for my $file_record (@outputs) {
         if ($file_record->[1] eq 'nwk') {
             my $treeFile = $file_record->[0];
             print STDERR "About to call p3x-newick-to-phyloxml on $treeFile\n" if $debug;
             print STDERR "run: " . join(' ', (@command, $treeFile)), "\n";
-            $step_info->{command_line} = join(' ', (@command, $treeFile)) . "\n";
+            $step_info->{command_line} .= join(' ', (@command, $treeFile)) . "\n";
             my $ok = IPC::Run::run([@command, $treeFile]);
             my $phyloxml_file = $treeFile;
             $phyloxml_file =~ s/.nwk//;
@@ -670,8 +686,17 @@ sub build_tree {
 
     print STDERR '\@outputs = '. Dumper(\@outputs);
     my $output_folder = $app->result_folder();
+    my @subfolders;
     for my $output (@outputs) {
-        my($ofile, $type) = @$output;
+        my($ofile, $type, $subfolder) = @$output;
+        if ($subfolder and not any {$_ eq $subfolder} @subfolders) {
+            push @subfolders, $subfolder;
+        }
+    }
+    system("p3-mkdir $output_folder/$_") for @subfolders;
+
+    for my $output (@outputs) {
+        my($ofile, $type, $subfolder) = @$output;
         next if $type eq 'folder';
         
         if (! -f $ofile) {
@@ -689,7 +714,9 @@ sub build_tree {
         }
         else { # fall back to calling CLI
             my $ext = $1 if $ofile =~ /.*\.(\S+)$/;
-            my @cmd = ("p3-cp", "-f", "-m", "${ext}=$type", $ofile, "ws:" . $app->result_folder);
+            my $dest = $output_folder;
+            $dest .= "/$subfolder" if $subfolder;
+            my @cmd = ("p3-cp", "-f", "-m", "${ext}=$type", $ofile, "ws:$dest");
             print STDERR "@cmd\n";
             my $ok = IPC::Run::run(\@cmd);
             if (!$ok)
@@ -799,13 +826,11 @@ sub label_tree_with_metadata {
 
 sub generate_tree_graphic {
     my ($input_newick, $num_tips, $graphic_format) = @_;
-    my ($step_comments, $step_info) = start_step("Generate Tree Graphic");
     my $file_base = basename($input_newick);
     $file_base =~ s/\..{2,6}//;
     my $tree_graphic_file = "$file_base." . lc($graphic_format);
     my $nexus_file = "$file_base.nex";
     my $comment = "run figtree input = $input_newick, output = $tree_graphic_file";
-    #push @{$step_comments}, $comment;
     print STDERR "$comment\n";
 
     open F, ">$nexus_file";
@@ -830,15 +855,11 @@ sub generate_tree_graphic {
         push @cmd, '-height', $height;
     }
     push @cmd, $nexus_file, $tree_graphic_file;
-    $comment = join(" ", @cmd);
-    $step_info->{command_line} = $comment;
-    print STDERR "$comment\n";
+    my $command_line = join(" ", @cmd);
+    print STDERR "$command_line\n";
 
     my ($stdout, $stderr) =  run_cmd(\@cmd);
-    $step_info->{stdout} = $stdout;
-    $step_info->{stderr} = $stderr;
-    end_step();
-    return $tree_graphic_file;
+    return $tree_graphic_file, $command_line, $stdout . $stderr;
 }
 
 sub curl_text {
