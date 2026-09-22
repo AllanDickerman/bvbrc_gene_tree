@@ -15,11 +15,12 @@ sub set_debug {
 }
 
 sub new {
-    my ($class, $alignment) = @_;
+    my ($class, $alignment, $alphabet) = @_;
     if ($debug) {
         print(STDERR "in Tree_Builder\n");
         print(STDERR " class = $class\n");
         print(STDERR " alignment = $alignment\n");
+        print(STDERR " alphabet = $alphabet\n");
     }
     my $self = {};
     bless $self, $class;
@@ -29,6 +30,12 @@ sub new {
     $output_base =~ s/^(.*)\..*/$1/; # remove extension if it exists
     print STDERR "output_base = $output_base\n";
     $self->{_output_base} = $output_base;
+    if ($alphabet) {
+        $self->{_alphabet} = $alphabet;
+    }
+    else {
+        $self->{_alphabet} = autodetect_alphabet($alignment);
+    }
 
     $self->{_parallel} = 2;
     $self->{_model} = 'GTR';
